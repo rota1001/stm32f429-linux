@@ -1,0 +1,38 @@
+diff --color -urN buildroot-2026.02/package/busybox/busybox.mk ../buildroot-2026.02/package/busybox/busybox.mk
+--- buildroot-2026.02-rc2/package/busybox/busybox.mk	2026-02-25 01:43:38.000000000 +0800
++++ ../buildroot-2026.02-rc2/package/busybox/busybox.mk	2026-03-15 22:10:18.705406426 +0800
+@@ -23,7 +23,7 @@
+ BUSYBOX_IGNORE_CVES += CVE-2025-60876
+ 
+ BUSYBOX_CFLAGS = \
+-	$(TARGET_CFLAGS)
++	$(TARGET_CFLAGS) -Os -mthumb -mcpu=cortex-m4 -fpic -mpic-register=r10 -mno-pic-data-is-text-relative
+ 
+ BUSYBOX_LDFLAGS = \
+ 	$(TARGET_LDFLAGS)
+diff --color -urN buildroot-2026.02/package/Makefile.in ../buildroot-2026.02/package/Makefile.in
+--- buildroot-2026.02-rc2/package/Makefile.in	2026-02-25 01:43:38.000000000 +0800
++++ ../buildroot-2026.02-rc2/package/Makefile.in	2026-03-15 22:18:14.234804187 +0800
+@@ -218,8 +218,8 @@
+ TARGET_CFLAGS += -fPIC
+ endif
+ ELF2FLT_FLAGS = $(if $($(PKG)_FLAT_STACKSIZE),\
+-	-Wl$(comma)-elf2flt="-r -s$($(PKG)_FLAT_STACKSIZE)",\
+-        -Wl$(comma)-elf2flt=-r)
++	-Wl$(comma)-elf2flt="-s$($(PKG)_FLAT_STACKSIZE)",\
++        -Wl$(comma)-elf2flt)
+ TARGET_CFLAGS += $(ELF2FLT_FLAGS)
+ TARGET_CXXFLAGS += $(ELF2FLT_FLAGS)
+ TARGET_FCFLAGS += $(ELF2FLT_FLAGS)
+diff --color -urN buildroot-2026.02/package/uclibc/uclibc.mk ../buildroot-2026.02/package/uclibc/uclibc.mk
+--- buildroot-2026.02-rc2/package/uclibc/uclibc.mk	2026-02-25 01:43:38.000000000 +0800
++++ ../buildroot-2026.02-rc2/package/uclibc/uclibc.mk	2026-03-15 21:27:25.682220959 +0800
+@@ -382,7 +382,7 @@
+ # Commands
+ #
+ 
+-UCLIBC_EXTRA_CFLAGS = $(TARGET_ABI) $(TARGET_DEBUGGING)
++UCLIBC_EXTRA_CFLAGS = $(TARGET_ABI) $(TARGET_DEBUGGING) -fpic -mpic-register=r10 -Os -mthumb -mcpu=cortex-m4 -mno-pic-data-is-text-relative
+ 
+ # uClibc-ng does not build with LTO, so explicitly disable it
+ # when using a compiler that may have support for LTO

@@ -1,0 +1,24 @@
+--- a/libc/sysdeps/linux/arm/crt1.S
++++ b/libc/sysdeps/linux/arm/crt1.S
+@@ -279,10 +279,6 @@
+ 	str a1, [sp, #-4]!
+ 
+ #ifdef __PIC__
+-	ldr sl, .L_GOT
+-	adr a4, .L_GOT
+-	add sl, sl, a4
+-
+ 	ldr ip, .L_GOT+4	/* _fini */
+ 	ldr a1, [sl, ip]
+ 	str a1, [sp, #-4]!	/* Push _fini */
+
+--- a/libc/sysdeps/linux/Makefile.commonarch
++++ b/libc/sysdeps/linux/Makefile.commonarch
+@@ -23,6 +23,7 @@
+ CFLAGS-OMIT-crti.S := -D_LIBC_REENTRANT
+ CFLAGS-OMIT-crtn.S := -D_LIBC_REENTRANT
+ CFLAGS-OMIT-crtreloc.c := -D_LIBC_REENTRANT
++CFLAGS-crt1.S += $(PICFLAG)
+ CFLAGS-crti.S += $(PICFLAG)
+ CFLAGS-crtn.S += $(PICFLAG)
+ # Due to a "bug" in make these order_only prereqs inherit per-target flags.
