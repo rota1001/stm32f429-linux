@@ -25,9 +25,12 @@ fetch_sources() {
 }
 
 build() {
+    cd $BUILDROOT_DIR
     make stm32f429_disco_xip_defconfig
+    make -j`nproc`
+    cd $ROOT_DIR
 }
 
 fetch_sources
 patch_buildroot
-
+build
