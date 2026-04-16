@@ -1,6 +1,6 @@
-diff --color -urN linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts ../linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts
+diff -urN -x '.files-list-*' -x '.applied*' -x .applied_patches_list -x .br_regen_dot_config -x '*include-prefixes*' linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts ../buildroot-2026.02/output/build/linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts
 --- linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts	2026-02-27 07:01:41.000000000 +0800
-+++ ../linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts	2026-04-08 14:20:46.671476347 +0800
++++ ../buildroot-2026.02/output/build/linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts	2026-04-16 17:39:18.093484211 +0800
 @@ -57,7 +57,7 @@
  	compatible = "st,stm32f429i-disco", "st,stm32f429";
  
@@ -20,9 +20,9 @@ diff --color -urN linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts ../linux
 +		bank-width = <4>;
 +		#address-cells = <1>;
 +
-+		partition@190000 {
++		partition@19d000 {
 +			label = "romfs";
-+			reg = <0x190000 0x70000>;
++			reg = <0x19d000 0x63000>;
 +		};
 +	};
 +
@@ -59,9 +59,43 @@ diff --color -urN linux-6.19.4/arch/arm/boot/dts/st/stm32f429-disco.dts ../linux
 +    broken-cd;
 +    vmmc-supply = <&v3v3>;
 +};
-diff --color -urN linux-6.19.4/drivers/gpu/drm/stm/ltdc.c ../linux-6.19.4/drivers/gpu/drm/stm/ltdc.c
+diff -urN -x '.files-list-*' -x '.applied*' -x .applied_patches_list -x .br_regen_dot_config -x '*include-prefixes*' linux-6.19.4/drivers/char/hw_random/stm32-rng.c ../buildroot-2026.02/output/build/linux-6.19.4/drivers/char/hw_random/stm32-rng.c
+--- linux-6.19.4/drivers/char/hw_random/stm32-rng.c	2026-02-27 07:01:41.000000000 +0800
++++ ../buildroot-2026.02/output/build/linux-6.19.4/drivers/char/hw_random/stm32-rng.c	2026-04-16 17:39:18.099484276 +0800
+@@ -363,11 +363,21 @@
+		return -EINVAL;
+	}
+
+-	clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
++	if (IS_ENABLED(CONFIG_PM))
++		clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
+
+	return 0;
+ }
+
++static void stm32_rng_cleanup(struct hwrng *rng)
++{
++		struct stm32_rng_private *priv =
++			container_of(rng, struct stm32_rng_private, rng);
++		if (!IS_ENABLED(CONFIG_PM))
++		clk_bulk_disable_unprepare(priv->data->nb_clock, priv->clk_bulk);
++}
++
++
+ static void stm32_rng_remove(struct platform_device *ofdev)
+ {
+	pm_runtime_disable(&ofdev->dev);
+@@ -563,6 +573,7 @@
+
+	priv->rng.name = dev_driver_string(dev);
+	priv->rng.init = stm32_rng_init;
++    priv->rng.cleanup = stm32_rng_cleanup;
+	priv->rng.read = stm32_rng_read;
+	priv->rng.quality = 900;
+
+diff -urN -x '.files-list-*' -x '.applied*' -x .applied_patches_list -x .br_regen_dot_config -x '*include-prefixes*' linux-6.19.4/drivers/gpu/drm/stm/ltdc.c ../buildroot-2026.02/output/build/linux-6.19.4/drivers/gpu/drm/stm/ltdc.c
 --- linux-6.19.4/drivers/gpu/drm/stm/ltdc.c	2026-02-27 07:01:41.000000000 +0800
-+++ ../linux-6.19.4/drivers/gpu/drm/stm/ltdc.c	2026-04-08 13:42:02.685213028 +0800
++++ ../buildroot-2026.02/output/build/linux-6.19.4/drivers/gpu/drm/stm/ltdc.c	2026-04-16 17:39:18.104484330 +0800
 @@ -2079,16 +2079,16 @@
  		drm_err(ddev, "Failed calling drm_vblank_init()\n");
  		goto err;
