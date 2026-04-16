@@ -32,5 +32,4 @@ build() {
 }
 
 fetch_sources
-patch_buildroot
 build
