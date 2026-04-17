@@ -1,0 +1,45 @@
+From fcc5b167ad39b2d7fd1678d7982a26aae1ed4aa9 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Sat, 18 Apr 2026 01:51:05 +0800
+Subject: [PATCH 2/3] Modify flash script of stm32f429-disco
+
+---
+ .../stmicroelectronics/stm32f429-disco/flash.sh  | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/board/stmicroelectronics/stm32f429-disco/flash.sh b/board/stmicroelectronics/stm32f429-disco/flash.sh
+index 3e2bf121..79daa5c9 100755
+--- a/board/stmicroelectronics/stm32f429-disco/flash.sh
++++ b/board/stmicroelectronics/stm32f429-disco/flash.sh
+@@ -14,6 +14,20 @@ if ! test -d "${OUTPUT_DIR}" ; then
+     exit 1
+ fi
+ 
++COMBINED="${OUTPUT_DIR}/images/xip_rootfs_combined.bin"
++XIP_SIZE=$(stat -c%s "${OUTPUT_DIR}/images/xipImage")
++PAD_TARGET=$((0x08150000 - 0x0800C000))
++if [ "$XIP_SIZE" -gt "$PAD_TARGET" ]; then
++    echo "ERROR: xipImage ($XIP_SIZE bytes) exceeds rootfs start offset ($PAD_TARGET bytes)"
++    exit 1
++fi
++PAD_BYTES=$((PAD_TARGET - XIP_SIZE))
++echo "Creating combined image: xipImage ($XIP_SIZE bytes) + $PAD_BYTES pad bytes + rootfs"
++cp "${OUTPUT_DIR}/images/xipImage" "${COMBINED}"
++dd if=/dev/zero bs=1 count=$PAD_BYTES 2>/dev/null | tr '\000' '\377' >> "${COMBINED}"
++cat "${OUTPUT_DIR}/images/rootfs.romfs" >> "${COMBINED}"
++echo "Combined image size: $(stat -c%s "${COMBINED}") bytes"
++
+ ${OUTPUT_DIR}/host/bin/openocd -f board/${BOARD_NAME}.cfg \
+   -c "init" \
+   -c "reset init" \
+@@ -21,6 +35,6 @@ ${OUTPUT_DIR}/host/bin/openocd -f board/${BOARD_NAME}.cfg \
+   -c "flash info 0" \
+   -c "flash write_image erase ${OUTPUT_DIR}/images/stm32f429i-disco.bin 0x08000000" \
+   -c "flash write_image erase ${OUTPUT_DIR}/images/stm32f429-disco.dtb 0x08004000" \
+-  -c "flash write_image erase ${OUTPUT_DIR}/images/xipImage 0x0800C000" \
++  -c "flash write_image erase ${COMBINED} 0x0800C000" \
+   -c "reset run" \
+   -c "shutdown"
+-- 
+2.43.0
+

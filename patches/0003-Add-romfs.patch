@@ -1,0 +1,216 @@
+From 9c96509f7f60e363a0451fba4178a0363a0b40e8 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Sat, 18 Apr 2026 03:20:12 +0800
+Subject: [PATCH 3/3] Add romfs
+
+---
+ Config.in.legacy                              | 11 ------
+ .../common/stm32f4xx/stm32-post-build.sh      | 15 ++++++++
+ fs/Config.in                                  |  1 +
+ fs/romfs/Config.in                            |  4 +++
+ fs/romfs/romfs.mk                             | 13 +++++++
+ package/Config.in.host                        |  1 +
+ package/genromfs/0001-build-system.patch      | 26 ++++++++++++++
+ package/genromfs/Config.in.host               |  6 ++++
+ package/genromfs/genromfs.hash                |  3 ++
+ package/genromfs/genromfs.mk                  | 34 +++++++++++++++++++
+ 10 files changed, 103 insertions(+), 11 deletions(-)
+ create mode 100644 fs/romfs/Config.in
+ create mode 100644 fs/romfs/romfs.mk
+ create mode 100644 package/genromfs/0001-build-system.patch
+ create mode 100644 package/genromfs/Config.in.host
+ create mode 100644 package/genromfs/genromfs.hash
+ create mode 100644 package/genromfs/genromfs.mk
+
+diff --git a/Config.in.legacy b/Config.in.legacy
+index a2a7b06a..2158015f 100644
+--- a/Config.in.legacy
++++ b/Config.in.legacy
+@@ -1141,17 +1141,6 @@ config BR2_PACKAGE_W_SCAN
+ 	  The w_scan package was removed as it is not maintained
+ 	  anymore and the upstream URL is gone.
+ 
+-config BR2_PACKAGE_GENROMFS
+-	bool "genromfs"
+-	select BR2_LEGACY
+-	help
+-	  Romfs root filesystem support has been removed.
+-
+-config BR2_TARGET_ROOTFS_ROMFS
+-	bool "romfs root filesystem has been removed"
+-	select BR2_LEGACY
+-	help
+-	  Romfs root filesystem support has been removed.
+ 
+ config BR2_BINUTILS_VERSION_2_41_X
+ 	bool "binutils 2.41 has been removed"
+diff --git a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+index 2c5b6be0..daaa7e75 100755
+--- a/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
++++ b/board/stmicroelectronics/common/stm32f4xx/stm32-post-build.sh
+@@ -6,3 +6,18 @@ sed -i '/hostname/d' ${TARGET_DIR}/etc/inittab
+ 
+ # Kernel is built without devpts support
+ sed -i '/^devpts/d' ${TARGET_DIR}/etc/fstab
++
++if [ -d "${TARGET_DIR}/lib" ]; then
++    rm -f "${TARGET_DIR}/lib/libgcc_s.so"*
++fi
++
++TARGET_STRIP="${TARGET_DIR}/../host/bin/arm-buildroot-uclinuxfdpiceabi-strip"
++if [ -x "${TARGET_STRIP}" ]; then
++    if [ -d "${TARGET_DIR}/lib" ]; then
++        find "${TARGET_DIR}/lib" -name "*.so*" -type f -exec "${TARGET_STRIP}" --strip-unneeded {} + 2>/dev/null || true
++    fi
++
++    if [ -f "${TARGET_DIR}/bin/busybox" ]; then
++        "${TARGET_STRIP}" --strip-unneeded "${TARGET_DIR}/bin/busybox"
++    fi
++fi
+diff --git a/fs/Config.in b/fs/Config.in
+index 42b0e608..b3033520 100644
+--- a/fs/Config.in
++++ b/fs/Config.in
+@@ -16,5 +16,6 @@ source "fs/tar/Config.in"
+ source "fs/ubi/Config.in"
+ source "fs/ubifs/Config.in"
+ source "fs/yaffs2/Config.in"
++source "fs/romfs/Config.in"
+ 
+ endmenu
+diff --git a/fs/romfs/Config.in b/fs/romfs/Config.in
+new file mode 100644
+index 00000000..84944a0f
+--- /dev/null
++++ b/fs/romfs/Config.in
+@@ -0,0 +1,4 @@
++config BR2_TARGET_ROOTFS_ROMFS
++	bool "romfs root filesystem"
++	help
++	  Build a romfs image of the root filesystem.
+diff --git a/fs/romfs/romfs.mk b/fs/romfs/romfs.mk
+new file mode 100644
+index 00000000..163751b4
+--- /dev/null
++++ b/fs/romfs/romfs.mk
+@@ -0,0 +1,13 @@
++################################################################################
++#
++# Build the romfs root filesystem image
++#
++################################################################################
++
++ROOTFS_ROMFS_DEPENDENCIES = host-genromfs
++
++define ROOTFS_ROMFS_CMD
++	$(HOST_DIR)/bin/genromfs -d $(TARGET_DIR) -f $@
++endef
++
++$(eval $(rootfs))
+diff --git a/package/Config.in.host b/package/Config.in.host
+index 2160a0f5..3a470cf9 100644
+--- a/package/Config.in.host
++++ b/package/Config.in.host
+@@ -131,5 +131,6 @@ menu "Host utilities"
+ 	source "package/xorriso/Config.in.host"
+ 	source "package/zip/Config.in.host"
+ 	source "package/zstd/Config.in.host"
++    source "package/genromfs/Config.in.host"
+ 
+ endmenu
+diff --git a/package/genromfs/0001-build-system.patch b/package/genromfs/0001-build-system.patch
+new file mode 100644
+index 00000000..827fe75b
+--- /dev/null
++++ b/package/genromfs/0001-build-system.patch
+@@ -0,0 +1,26 @@
++---
++ Makefile |    4 +---
++ 1 file changed, 1 insertion(+), 3 deletions(-)
++
++Index: genromfs-0.5.2/Makefile
++===================================================================
++--- genromfs-0.5.2.orig/Makefile
+++++ genromfs-0.5.2/Makefile
++@@ -6,8 +6,6 @@
++ PACKAGE = genromfs
++ VERSION = 0.5.2
++ CC = gcc
++-CFLAGS = -O2 -Wall -DVERSION=\"$(VERSION)\"#-g#
++-LDFLAGS = -s#-g
++ 
++ DISTDIR = $(PACKAGE)-$(VERSION)
++ 
++@@ -24,7 +22,7 @@
++ 	$(CC) $(LDFLAGS) genromfs.o -o genromfs
++ 
++ .c.o:
++-	$(CC) $(CFLAGS) $< -c -o $@
+++	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" $< -c -o $@
++ 
++ clean:
++ 	rm -f genromfs *.o
+diff --git a/package/genromfs/Config.in.host b/package/genromfs/Config.in.host
+new file mode 100644
+index 00000000..e4eba9f1
+--- /dev/null
++++ b/package/genromfs/Config.in.host
+@@ -0,0 +1,6 @@
++config BR2_PACKAGE_GENROMFS
++	bool "genromfs"
++	help
++	  Tool to generate a ROMFS filesystem.
++
++	  http://romfs.sourceforge.net/
+diff --git a/package/genromfs/genromfs.hash b/package/genromfs/genromfs.hash
+new file mode 100644
+index 00000000..0be88ee1
+--- /dev/null
++++ b/package/genromfs/genromfs.hash
+@@ -0,0 +1,3 @@
++# Locally computed:
++sha256  30f37fc734572c1dbaa2504585bc23ba6b8fd7df767ae7155995b2ca0ebed960  genromfs-0.5.2.tar.gz
++sha256  cc2a6651c315b233ebc110b49ea3c6452eff9a28f8bc051ffd2bb92a8dcfa3d2  COPYING
+diff --git a/package/genromfs/genromfs.mk b/package/genromfs/genromfs.mk
+new file mode 100644
+index 00000000..fd696b45
+--- /dev/null
++++ b/package/genromfs/genromfs.mk
+@@ -0,0 +1,34 @@
++################################################################################
++#
++# genromfs
++#
++################################################################################
++
++GENROMFS_VERSION = 0.5.2
++GENROMFS_SITE = http://downloads.sourceforge.net/project/romfs/genromfs/$(GENROMFS_VERSION)
++GENROMFS_LICENSE = GPL-2.0+
++GENROMFS_LICENSE_FILES = COPYING
++
++define GENROMFS_BUILD_CMDS
++	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
++		CC="$(TARGET_CC)" \
++		CFLAGS="$(TARGET_CFLAGS)" \
++		LDFLAGS="$(TARGET_LDFLAGS)"
++endef
++
++# "PREFIX" is the equivalent of DESTDIR in autotools, "prefix" is the
++# traditional prefix. "prefix" defaults to /usr so no need to set it.
++define GENROMFS_INSTALL_TARGET_CMDS
++	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) PREFIX=$(TARGET_DIR) install
++endef
++
++define HOST_GENROMFS_BUILD_CMDS
++	$(HOST_MAKE_ENV) $(MAKE) -C $(@D)
++endef
++
++define HOST_GENROMFS_INSTALL_CMDS
++	$(HOST_MAKE_ENV) $(MAKE) -C $(@D) prefix=$(HOST_DIR) install
++endef
++
++$(eval $(generic-package))
++$(eval $(host-generic-package))
+-- 
+2.43.0
+
