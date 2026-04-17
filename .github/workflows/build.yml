@@ -1,0 +1,33 @@
+name: Buildroot
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Build buildroot
+        run: |
+          wget https://buildroot.org/downloads/buildroot-2026.02.tar.xz
+          sudo chown -R $USER:$USER .
+          sudo chmod -R 777 .
+          docker run --rm \
+            -v ${{ github.workspace }}:/work \
+            -w /work \
+            buildroot/base:latest \
+            /bin/bash -c "./build.sh"

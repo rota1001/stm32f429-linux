@@ -17,8 +17,10 @@ patch_buildroot() {
 }
 
 fetch_sources() {
-    if [ ! -d "$BUILDROOT_DIR" ]; then
+    if [ ! -f "buildroot-$BUILDROOT_VERSION.tar.xz" ]; then
         wget https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.xz
+    fi
+    if [ ! -d "$BUILDROOT_DIR" ]; then
         tar xvf buildroot-$BUILDROOT_VERSION.tar.xz
         patch_buildroot
     fi
