@@ -1,5 +1,5 @@
 #!/bin/sh
-
+set -eux
 
 BUILDROOT_VERSION=2026.02
 
@@ -9,10 +9,12 @@ BUILDROOT_DIR="$ROOT_DIR/buildroot-$BUILDROOT_VERSION"
 patch_buildroot() {
     cp buildroot.config "$BUILDROOT_DIR/configs/stm32f429_disco_xip_defconfig"
     cp linux.config "$BUILDROOT_DIR/board/stmicroelectronics/stm32f429-disco"
-    cp linux.patch "$BUILDROOT_DIR/board/stmicroelectronics/stm32f429-disco/patches/linux"
-    mkdir -p "$BUILDROOT_DIR/board/stmicroelectronics/stm32f429-disco/patches/uclibc"
-    cp flat-binary-xip.patch "$BUILDROOT_DIR/board/stmicroelectronics/stm32f429-disco/patches/uclibc"
-    cd "$BUILDROOT_DIR" && patch -p1 < "$ROOT_DIR/buildroot.patch"
+    cp busybox-minimal.config "$BUILDROOT_DIR/package/busybox"
+    cp uClibc-ng.config "$BUILDROOT_DIR/package/uclibc"
+    cd "$BUILDROOT_DIR"
+    for p in "$ROOT_DIR"/patches/*.patch; do
+        patch -p1 < "$p"
+    done
     cd "$ROOT_DIR"
 }
 
