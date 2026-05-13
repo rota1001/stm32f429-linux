@@ -1,0 +1,57 @@
+From 94d58245674a0cd7414fb6453f31b1e3186087b3 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Wed, 13 May 2026 18:28:07 +0800
+Subject: [PATCH] Enable dynamic linked tslib
+
+---
+ CMakeLists.txt | 25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 525ece5..80d8dfd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -90,18 +90,16 @@ if (CONFIG_LV_USE_EVDEV)
+ endif()
+ 
+ if (CONFIG_LV_USE_TSLIB)
+-    message("Including TSLIB support (static .a)")
++    message("Including TSLIB support (dynamic link libts.so)")
+ 
+-    # Use tslib from buildroot sysroot
+-    set(TSLIB_INC "${CMAKE_SYSROOT}/usr/include")
+-    set(TSLIB_LIB "${CMAKE_SYSROOT}/usr/lib/libts.a")
++    # Use tslib from cellphone build directory
++    set(TSLIB_LIB_DIR "${CMAKE_CURRENT_LIST_DIR}/../build/lib")
++    set(TSLIB_INC_DIR "${CMAKE_CURRENT_LIST_DIR}/../tslib/src")
+ 
+-    if(NOT EXISTS "${TSLIB_LIB}")
+-        message(FATAL_ERROR "TSLIB static library not found at ${TSLIB_LIB}")
+-    endif()
+-
+-    list(APPEND PKG_CONFIG_LIB ${TSLIB_LIB})
+-    list(APPEND PKG_CONFIG_INC ${TSLIB_INC})
++    # Use full .so path so the linker resolves the shared library even
++    # without a libts.so -> libts.so.0 symlink.
++    list(APPEND PKG_CONFIG_LIB "${TSLIB_LIB_DIR}/libts.so.0")
++    list(APPEND PKG_CONFIG_INC ${TSLIB_INC_DIR})
+     list(APPEND LV_LINUX_BACKEND_SRC src/lib/indev_backends/tslib.c)
+ endif()
+ 
+@@ -429,6 +427,13 @@ add_executable(lvglsim src/main.c)
+ # Repeat lvgl_linux to resolve circular dependency with lvgl
+ target_link_libraries(lvglsim lvgl_linux lvgl lvgl_linux)
+ 
++# Set RPATH to /usr/lib so the dynamic linker finds libts.so.0 on the board.
++# SKIP_BUILD_RPATH prevents CMake from injecting the build directory.
++set_target_properties(lvglsim PROPERTIES
++    SKIP_BUILD_RPATH TRUE
++    BUILD_WITH_INSTALL_RPATH FALSE)
++target_link_options(lvglsim PRIVATE "-Wl,-rpath,/usr/lib")
++
+ if(WERROR)
+     target_compile_options(lvglsim PRIVATE -Werror)
+     target_compile_options(lvgl PRIVATE -Werror)
+-- 
+2.43.0
+

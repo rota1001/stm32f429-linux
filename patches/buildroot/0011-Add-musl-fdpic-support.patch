@@ -1,0 +1,133 @@
+From 5da2c2edd9c03986bd27d215df4bc6047e943ed7 Mon Sep 17 00:00:00 2001
+From: Chisheng Chen <johnny1001s000602@gmail.com>
+Date: Wed, 13 May 2026 14:51:10 +0800
+Subject: [PATCH 11/11] Add musl fdpic support
+
+---
+ package/gcc/gcc-final/gcc-final.mk | 10 +++++
+ package/musl/Config.in             |  1 -
+ package/musl/musl.mk               | 59 +++++++++++++++++++++++++++++-
+ 3 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/package/gcc/gcc-final/gcc-final.mk b/package/gcc/gcc-final/gcc-final.mk
+index 97a64ae2..d70a59b4 100644
+--- a/package/gcc/gcc-final/gcc-final.mk
++++ b/package/gcc/gcc-final/gcc-final.mk
+@@ -194,5 +194,15 @@ endef
+ GCC_FINAL_POST_INSTALL_STAGING_HOOKS += HOST_GCC_FINAL_M68K_LIBGCC_FIXUP
+ endif
+ 
++define HOST_GCC_FINAL_FIX_SPECS_MUSL
++	SPEC_DIR=$$(dirname $$($(HOST_DIR)/bin/$(GNU_TARGET_NAME)-gcc \
++		-print-libgcc-file-name 2>/dev/null)); \
++	$(HOST_DIR)/bin/$(GNU_TARGET_NAME)-gcc -dumpspecs \
++		> "$$SPEC_DIR/specs" 2>/dev/null; \
++	$(SED) 's|/lib/ld-uClibc\.so\.0|/lib/ld-musl-arm.so.1|g' \
++		"$$SPEC_DIR/specs"
++endef
++HOST_GCC_FINAL_POST_INSTALL_HOOKS += HOST_GCC_FINAL_FIX_SPECS_MUSL
++
+ $(eval $(generic-package))
+ $(eval $(host-autotools-package))
+diff --git a/package/musl/Config.in b/package/musl/Config.in
+index 70475326..3d97d1a2 100644
+--- a/package/musl/Config.in
++++ b/package/musl/Config.in
+@@ -24,7 +24,6 @@ config BR2_PACKAGE_MUSL_ARCH_SUPPORTS
+ 	depends on !(BR2_powerpc64 || BR2_powerpc64le) || BR2_POWERPC_CPU_HAS_ALTIVEC
+ 	# sh2 nommu is supported by musl, but we don't have support
+ 	# for it in Buildroot.
+-	depends on BR2_USE_MMU
+ 
+ config BR2_PACKAGE_MUSL_SUPPORTS
+ 	bool
+diff --git a/package/musl/musl.mk b/package/musl/musl.mk
+index 13a49a15..d9b7cd5c 100644
+--- a/package/musl/musl.mk
++++ b/package/musl/musl.mk
+@@ -42,6 +42,47 @@ ifeq ($(BR2_ARM_INSTRUCTIONS_THUMB),y)
+ MUSL_EXTRA_CFLAGS += -marm
+ endif
+ 
++MUSL_OMIT_SRCS_GLOBS = ./src/aio/*.c ./src/complex/*.c ./src/crypt/*.c 	\
++    ./src/mq/*.c ./src/locale/*.c ./src/multibyte/*.c 					\
++    ./src/ctype/isw*.c ./src/ctype/tow*.c ./src/ctype/wc*.c 			\
++    ./src/misc/wordexp.c ./src/misc/nftw.c ./src/legacy/ftw.c \
++    ./src/time/__map_file.c \
++    ./src/stdlib/atof.c ./src/stdlib/wcstod.c\
++	./src/locale/__lctrans.c ./src/locale/c_locale.c ./src/locale/langinfo.c ./src/locale/localeconv.c ./src/locale/setlocale.c ./src/locale/strcoll.c
++
++MUSL_BUILD_VARS = \
++    MALLOC_DIR=oldmalloc \
++    COMPAT_SRC_DIRS=
++
++MUSL_EXTRA_CFLAGS += -fno-semantic-interposition \
++    -DMUSL_BUSYBOX_ONLY_NO_RUNTIME_DL \
++    -DMUSL_BUSYBOX_ONLY_NO_TZFILE
++
++MUSL_PRUNE_UNUSED_MATH = 1
++MUSL_KEEP_MATH_SRCS = copysign.c copysignl.c fabs.c fabsl.c fmod.c fmodl.c \
++    frexp.c frexpl.c scalbn.c scalbnf.c scalbnl.c
++
++MUSL_PRUNE_MATH_CMD = 														\
++    if [ "$(MUSL_PRUNE_UNUSED_MATH)" = "1" ]; then 							\
++        for f in $(@D)/src/math/*.c; do										\
++            bn="$$(basename "$$f")"; 										\
++			keep=0; 														\
++            for k in $(MUSL_KEEP_MATH_SRCS); do 							\
++				if [ "$$bn" = "$$k" ]; then 								\
++					keep=1; 												\
++				fi 															\
++            done; 															\
++			if [ "$$keep" = "0" ]; then 									\
++				omit_srcs="$$omit_srcs ./src/math/$$bn"; 					\
++			fi 																\
++        done; 																\
++        for f in $(@D)/src/math/arm/*.c; do						 			\
++            if [ -f "$$f" ]; then 											\
++				omit_srcs="$$omit_srcs ./src/math/arm/$$(basename "$$f")";	\
++			fi															   	\
++        done; 																\
++    fi
++
+ define MUSL_CONFIGURE_CMDS
+ 	(cd $(@D); \
+ 		$(TARGET_CONFIGURE_OPTS) \
+@@ -58,17 +99,33 @@ define MUSL_CONFIGURE_CMDS
+ endef
+ 
+ define MUSL_BUILD_CMDS
+-	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D)
++	@omit_srcs="$(MUSL_OMIT_SRCS_GLOBS)"; \
++	$(MUSL_PRUNE_MATH_CMD); \
++	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
++		$(MUSL_BUILD_VARS) \
++		OMIT_SRCS_GLOBS="$$omit_srcs" \
++		CFLAGS="$(TARGET_CFLAGS) $(MUSL_EXTRA_CFLAGS)"
+ endef
+ 
++
+ define MUSL_INSTALL_STAGING_CMDS
++	@omit_srcs="$(MUSL_OMIT_SRCS_GLOBS)"; \
++	$(MUSL_PRUNE_MATH_CMD); \
+ 	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
++		$(MUSL_BUILD_VARS) \
++		OMIT_SRCS_GLOBS="$$omit_srcs" \
++		CFLAGS="$(TARGET_CFLAGS) $(MUSL_EXTRA_CFLAGS)" \
+ 		DESTDIR=$(STAGING_DIR) install-libs install-tools install-headers
+ 	ln -sf libc.so $(STAGING_DIR)/lib/ld-musl*
+ endef
+ 
+ define MUSL_INSTALL_TARGET_CMDS
++	@omit_srcs="$(MUSL_OMIT_SRCS_GLOBS)"; \
++	$(MUSL_PRUNE_MATH_CMD); \
+ 	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
++		$(MUSL_BUILD_VARS) \
++		OMIT_SRCS_GLOBS="$$omit_srcs" \
++		CFLAGS="$(TARGET_CFLAGS) $(MUSL_EXTRA_CFLAGS)" \
+ 		DESTDIR=$(TARGET_DIR) install-libs
+ 	$(RM) $(addprefix $(TARGET_DIR)/lib/,crt1.o crtn.o crti.o rcrt1.o Scrt1.o)
+ 	ln -sf libc.so $(TARGET_DIR)/lib/ld-musl*
+-- 
+2.43.0
+

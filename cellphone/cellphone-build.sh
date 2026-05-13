@@ -4,12 +4,13 @@ BASE_DIR=$(pwd)/cellphone
 cd $BASE_DIR
 
 build_tslib() {
-    echo "tslib was built"
     if [ -f build/lib/libts.so.0 ]; then
-        return  
+        echo "tslib was built"
+        return
     fi
     TMP=$PATH
     export PATH=$BASE_DIR/../buildroot-2026.02/output/host/bin:$PATH
+    if [ -d tslib ]; then rm -rf tslib; fi
     git clone https://github.com/libts/tslib.git
     cd tslib
 
@@ -20,6 +21,10 @@ build_tslib() {
       --sysconfdir=/etc \
       --enable-static \
       --disable-debug \
+      --enable-input=static \
+      --enable-linear=static \
+      --enable-pthres=static \
+      --enable-dejitter=static \
       CFLAGS="-Os -fPIC"
     make -j`nproc`
     cd ..
@@ -41,12 +46,14 @@ build_cellphone() {
         echo "Cellphone was built"
         return 0
     fi
+    if [ -d lv_port_linux ]; then rm -rf lv_port_linux; fi
     git clone https://github.com/rota1001/lv_port_linux.git
     cd lv_port_linux
     git checkout cellphone
     git submodule update --init --recursive
-    cp ../cross_compile.cmake .
-    cmake -B build -DCMAKE_TOOLCHAIN_FILE=./cross_compile.cmake
+    rm -f cross_compile.cmake
+    patch -p1 < ../0001-Enable-dynamic-linked-tslib.patch
+    cmake -B build -DCMAKE_TOOLCHAIN_FILE="$BASE_DIR/cross_compile.cmake"
     cmake --build build -j$(nproc)
     cd $BASE_DIR
     cp lv_port_linux/build/bin/lvglsim build/bin

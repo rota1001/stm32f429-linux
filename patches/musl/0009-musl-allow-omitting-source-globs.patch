@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: cortexm-linux PR#19 <jserv@ccns.ncku.edu.tw>
+Subject: [PATCH] musl allow omitting source globs
+
+---
+--- a/Makefile
++++ b/Makefile
+@@ -6,8 +6,9 @@
+ SRC_DIRS = $(addprefix $(srcdir)/,src/* src/malloc/$(MALLOC_DIR) crt ldso $(COMPAT_SRC_DIRS))
+ BASE_GLOBS = $(addsuffix /*.c,$(SRC_DIRS))
+ ARCH_GLOBS = $(addsuffix /$(ARCH)/*.[csS],$(SRC_DIRS))
+-BASE_SRCS = $(sort $(wildcard $(BASE_GLOBS)))
+-ARCH_SRCS = $(sort $(wildcard $(ARCH_GLOBS)))
++OMIT_SRCS_GLOBS ?=
++BASE_SRCS = $(filter-out $(sort $(wildcard $(OMIT_SRCS_GLOBS))),$(sort $(wildcard $(BASE_GLOBS))))
++ARCH_SRCS = $(filter-out $(sort $(wildcard $(OMIT_SRCS_GLOBS))),$(sort $(wildcard $(ARCH_GLOBS))))
+ BASE_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(BASE_SRCS)))
+ ARCH_OBJS = $(patsubst $(srcdir)/%,%.o,$(basename $(ARCH_SRCS)))
+ REPLACED_OBJS = $(sort $(subst /$(ARCH)/,/,$(ARCH_OBJS)))

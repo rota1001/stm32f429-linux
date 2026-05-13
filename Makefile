@@ -27,16 +27,12 @@ initromfs: cellphone
 	mkdir -p rootfs/usr/lib/ts
 	mkdir -p rootfs/usr/lib
 	mv init/init rootfs
-	cp -a -d $(BUILDROOT_DIR)/output/target/lib/*libc* rootfs/lib
+	cp -a -d $(BUILDROOT_DIR)/output/target/lib/libc.so rootfs/lib
+	cp -a -d $(BUILDROOT_DIR)/output/target/lib/ld-musl-arm.so.1 rootfs/lib
 	cp -d cellphone/build/lib/libts.so.* rootfs/usr/lib
-	cp -d cellphone/build/lib/ts/dejitter.so rootfs/usr/lib/ts
-	cp -d cellphone/build/lib/ts/input.so rootfs/usr/lib/ts
-	cp -d cellphone/build/lib/ts/linear.so rootfs/usr/lib/ts
-	cp -d cellphone/build/lib/ts/pthres.so rootfs/usr/lib/ts
 	cp -a $(BUILDROOT_DIR)/output/target/usr/lib/*libdrm* rootfs/usr/lib
 	cp -a $(BUILDROOT_DIR)/output/target/usr/lib/*libevdev* rootfs/usr/lib
 	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs/usr/lib/lib*
-	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs/usr/lib/ts/*
 	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs/lib/*
 	$(BUILDROOT_DIR)/output/host/bin/genromfs -d rootfs -f $(BUILDROOT_DIR)/output/images/rootfs.romfs
 

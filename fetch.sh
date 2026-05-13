@@ -14,6 +14,7 @@ patch_buildroot() {
     cp busybox-minimal.config "$BUILDROOT_DIR/package/busybox"
     cp uClibc-ng.config "$BUILDROOT_DIR/package/uclibc"
     cp -a "$ROOT_DIR"/patches/linux/*.patch "$BUILDROOT_DIR/board/stmicroelectronics/stm32f429-disco/patches/linux"
+    cp -a "$ROOT_DIR"/patches/musl/*.patch "$BUILDROOT_DIR/package/musl"
 }
 
 fetch_sources() {

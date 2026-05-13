@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: cortexm-linux PR#19 <jserv@ccns.ncku.edu.tw>
+Subject: [PATCH] musl busybox only disable runtime dlfcn
+
+---
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -2100,6 +2100,7 @@ static void prepare_lazy(struct dso *p)
+ 	lazy_head = p;
+ }
+ 
++#ifndef MUSL_BUSYBOX_ONLY_NO_RUNTIME_DL
+ void *dlopen(const char *file, int mode)
+ {
+ 	struct dso *volatile p, *orig_tail, *orig_syms_tail, *orig_lazy_head, *next;
+@@ -2422,6 +2423,7 @@ int dl_iterate_phdr(int(*callback)(struct dl_phdr_info *info, size_t size, void
+ 	}
+ 	return ret;
+ }
++#endif
+ 
+ static void error_impl(const char *fmt, ...)
+ {

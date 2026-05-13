@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: cortexm-linux PR#19 <jserv@ccns.ncku.edu.tw>
+Subject: [PATCH] musl fdpic runtime relative laddr
+
+---
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -476,11 +476,19 @@
+ 			memcpy(reloc_addr, &(size_t){sym_val + addend}, sizeof(size_t));
+ 			break;
+ 		case REL_RELATIVE:
++#if DL_FDPIC
++			*reloc_addr = (size_t)laddr(dso, addend);
++#else
+ 			*reloc_addr = (size_t)base + addend;
++#endif
+ 			break;
+ 		case REL_SYM_OR_REL:
+ 			if (sym) *reloc_addr = sym_val + addend;
++#if DL_FDPIC
++			else *reloc_addr = (size_t)laddr(dso, addend);
++#else
+ 			else *reloc_addr = (size_t)base + addend;
++#endif
+ 			break;
+ 		case REL_COPY:
+ 			memcpy(reloc_addr, (void *)sym_val, sym->st_size);
