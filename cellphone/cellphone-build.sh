@@ -53,6 +53,9 @@ build_cellphone() {
     git submodule update --init --recursive
     rm -f cross_compile.cmake
     patch -p1 < ../0001-Enable-dynamic-linked-tslib.patch
+    # Cellphone photo-viewer optimizations (decode-to-RAM, thumb cache, RGB565, anims off)
+    patch -p1 < ../0002-cellphone-photo-opt-port.patch
+    patch -p1 -d lvgl < ../0002-cellphone-photo-opt-lvgl.patch
     cmake -B build -DCMAKE_TOOLCHAIN_FILE="$BASE_DIR/cross_compile.cmake"
     cmake --build build -j$(nproc)
     cd $BASE_DIR

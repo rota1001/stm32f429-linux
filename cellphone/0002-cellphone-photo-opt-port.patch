@@ -1,0 +1,93 @@
+diff --git a/src/lib/display_backends/drm.c b/src/lib/display_backends/drm.c
+index 5e2621a..0673a1f 100644
+--- a/src/lib/display_backends/drm.c
++++ b/src/lib/display_backends/drm.c
+@@ -19,6 +19,9 @@
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <stdbool.h>
++#if LV_DEBUG
++#include <stdio.h>   /* only the LV_DEBUG perf prints use printf */
++#endif
+ 
+ #include "lvgl/lvgl.h"
+ #if LV_USE_LINUX_DRM
+@@ -106,10 +109,44 @@ static void run_loop_drm(void)
+ {
+     uint32_t idle_time;
+ 
++#if LV_DEBUG
++    extern uint64_t g_io_us, g_io_bytes, g_decode_us, g_blit_us, g_flush_us, g_mcu_cnt, g_img_cnt;
++    extern uint64_t g_idct_us, g_yuv_us;
++    extern uint64_t perf_now_us(void);
++    {
++        lv_mem_monitor_t m;
++        lv_mem_monitor(&m);
++        printf(">>> lvglsim BUILD=LVMEM8  LV_MEM_SIZE total=%u KB free=%u KB used=%u%% <<<\n",
++               (unsigned)(m.total_size / 1024), (unsigned)(m.free_size / 1024), (unsigned)m.used_pct);
++        fflush(stdout);
++    }
++#endif
++
+     /* Handle LVGL tasks */
+     while(true) {
++#if LV_DEBUG
++        g_io_us = g_io_bytes = g_decode_us = g_blit_us = g_flush_us = g_mcu_cnt = g_img_cnt = 0;
++        g_idct_us = g_yuv_us = 0;
++        uint64_t _t0 = perf_now_us();
++#endif
+         /* Returns the time to the next timer execution */
+         idle_time = lv_timer_handler();
++#if LV_DEBUG
++        uint64_t fr = perf_now_us() - _t0;
++        if(g_decode_us + g_blit_us + g_flush_us > 1000) {  /* only frames that actually redrew */
++            /* decode breakdown: huff+dequant = decode - idct - yuv */
++            uint64_t huff = g_decode_us - g_idct_us - g_yuv_us;
++            printf("frame=%llu io=%llu(%lluB) decode=%llu[huff=%llu idct=%llu yuv=%llu] "
++                   "blit=%llu flush=%llu other=%llu imgs=%llu mcus=%llu\n",
++                   (unsigned long long)fr, (unsigned long long)g_io_us, (unsigned long long)g_io_bytes,
++                   (unsigned long long)g_decode_us, (unsigned long long)huff,
++                   (unsigned long long)g_idct_us, (unsigned long long)g_yuv_us,
++                   (unsigned long long)g_blit_us, (unsigned long long)g_flush_us,
++                   (unsigned long long)(fr - g_io_us - g_decode_us - g_blit_us - g_flush_us),
++                   (unsigned long long)g_img_cnt, (unsigned long long)g_mcu_cnt);
++            fflush(stdout);
++        }
++#endif
+         usleep(idle_time * 1000);
+     }
+ }
+diff --git a/src/lib/display_backends/fbdev.c b/src/lib/display_backends/fbdev.c
+index f330fd8..fd9cac3 100644
+--- a/src/lib/display_backends/fbdev.c
++++ b/src/lib/display_backends/fbdev.c
+@@ -104,11 +104,29 @@ static void run_loop_fbdev(void)
+ {
+     uint32_t idle_time;
+ 
++#if LV_DEBUG
++    extern uint64_t g_io_us, g_io_bytes, g_decode_us, g_blit_us, g_flush_us, g_mcu_cnt, g_img_cnt;
++    extern uint64_t perf_now_us(void);
++#endif
++
+     /* Handle LVGL tasks */
+     while(true) {
+ 
++#if LV_DEBUG
++        g_io_us = g_io_bytes = g_decode_us = g_blit_us = g_flush_us = g_mcu_cnt = g_img_cnt = 0;
++        uint64_t _t0 = perf_now_us();
++#endif
+         /* Returns the time to the next timer execution */
+         idle_time = lv_timer_handler();
++#if LV_DEBUG
++        uint64_t fr = perf_now_us() - _t0;
++        if(g_decode_us + g_blit_us + g_flush_us > 1000)   /* only frames that actually redrew */
++            printf("frame=%llu io=%llu(%lluB) decode=%llu blit=%llu flush=%llu other=%llu imgs=%llu mcus=%llu\n",
++                   (unsigned long long)fr, (unsigned long long)g_io_us, (unsigned long long)g_io_bytes,
++                   (unsigned long long)g_decode_us, (unsigned long long)g_blit_us, (unsigned long long)g_flush_us,
++                   (unsigned long long)(fr - g_io_us - g_decode_us - g_blit_us - g_flush_us),
++                   (unsigned long long)g_img_cnt, (unsigned long long)g_mcu_cnt);
++#endif
+         usleep(idle_time * 1000);
+     }
+ }

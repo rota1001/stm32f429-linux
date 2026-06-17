@@ -1,0 +1,987 @@
+diff --git a/demos/cellphone/lv_demo_cellphone.c b/demos/cellphone/lv_demo_cellphone.c
+index 6eb7e2ef4..98b17d365 100644
+--- a/demos/cellphone/lv_demo_cellphone.c
++++ b/demos/cellphone/lv_demo_cellphone.c
+@@ -321,7 +321,7 @@ static lv_obj_t * s_overlay_host;
+ static lv_timer_t * s_idle_timer;
+ static lv_demo_args_t s_demo_args;
+ static bool s_demo_args_valid;
+-static bool s_screen_transitions_enabled = true;
++static bool s_screen_transitions_enabled = false;   /* all UI motion off by default */
+ static uint32_t s_screen_event_shown;
+ static uint32_t s_screen_event_hidden;
+ 
+diff --git a/demos/cellphone/lv_demo_cellphone_anim.c b/demos/cellphone/lv_demo_cellphone_anim.c
+index 912ab355e..1132479c0 100644
+--- a/demos/cellphone/lv_demo_cellphone_anim.c
++++ b/demos/cellphone/lv_demo_cellphone_anim.c
+@@ -62,6 +62,14 @@ void cellphone_anim_run(lv_obj_t * obj, lv_anim_exec_xcb_t exec_cb,
+                         int32_t v0, int32_t v1, uint32_t dur,
+                         lv_anim_path_cb_t path)
+ {
++    /* When transitions are globally disabled, skip the animation and jump
++     * straight to the final state. This is the single switch that turns off
++     * essentially all UI motion that routes through this wrapper. */
++    if(!cellphone_screen_transitions_enabled()) {
++        if(exec_cb) exec_cb(obj, v1);
++        return;
++    }
++
+     lv_anim_t a;
+     lv_anim_init(&a);
+     lv_anim_set_var(&a, obj);
+diff --git a/demos/cellphone/lv_demo_cellphone_photo.c b/demos/cellphone/lv_demo_cellphone_photo.c
+index 583250e86..d21ed74aa 100644
+--- a/demos/cellphone/lv_demo_cellphone_photo.c
++++ b/demos/cellphone/lv_demo_cellphone_photo.c
+@@ -6,7 +6,11 @@
+ 
+ #include "lv_demo_cellphone_photo.h"
+ #include "lv_demo_cellphone_anim.h"
++#include "../../src/misc/cache/lv_cache.h"   /* lv_image_cache_drop */
+ #include <stddef.h>
++#if LV_DEBUG
++#include <stdio.h>
++#endif
+ 
+ #if LV_USE_DEMO_CELLPHONE
+ 
+@@ -58,7 +62,6 @@ typedef struct {
+  *  STATIC VARIABLES
+  **********************/
+ static uint32_t s_selected_photo_idx;
+-static uint32_t s_synced_photo_idx = PHOTO_IDX_NONE;
+ /* Runtime asset probe cache: 0 = unknown, 1 = present, 2 = missing.
+  * Probes once on first source-mode query so a missing assets directory
+  * silently falls back to dummy art without re-stating the FS each open. */
+@@ -72,20 +75,32 @@ static void thumb_click_cb(lv_event_t * e);
+ static void viewer_tap_cb(lv_event_t * e);
+ static void viewer_tile_changed_cb(lv_event_t * e);
+ static void viewer_visibility_cb(lv_event_t * e);
+-static void viewer_load_timer_cb(lv_timer_t * timer);
+ static void viewer_cancel_load_timer(void);
+-static void viewer_enter_deferred_mode(void);
+-static void viewer_sync_loaded_images(void);
+-static void viewer_schedule_loaded_image_sync(void);
++static void viewer_bind_tiles(void);
++static void viewer_ensure_decode_timer(void);
++static void viewer_decode_timer_cb(lv_timer_t * timer);
++static bool viewer_decode_one_pending(void);
++static void viewer_scroll_cb(lv_event_t * e);
++static void viewer_refr_ready_cb(lv_event_t * e);
++static void photo_ram_alloc(void);
++static void photo_ram_free(void);
++static void photo_decode_to_slot(uint32_t idx, int slot);
+ static void viewer_set_active_title(uint32_t photo_idx);
+ static void update_counter_label(uint32_t photo_idx);
+ static void viewer_delete_cb(lv_event_t * e);
+ static void init_photo_surface(lv_obj_t * obj, bool clickable,
+                                lv_coord_t radius, lv_event_cb_t click_cb, void * user_data);
+ static lv_obj_t * create_photo_card(lv_obj_t * parent, const cellphone_photo_asset_t * asset,
+-                                    const char * image_path, bool clickable, bool show_caption,
++                                    const void * image_path, bool clickable, bool show_caption,
+                                     lv_coord_t radius, lv_coord_t label_h,
+                                     lv_event_cb_t click_cb, void * user_data);
++static const void * photo_thumb_src(uint32_t i);
++static bool photo_decode_file_to_buf(const char * path, uint8_t * buf, uint32_t w, uint32_t h);
++#if LV_DEBUG
++static void photo_mem_report(const char * tag);
++#else
++#define photo_mem_report(tag) ((void)0)
++#endif
+ static void create_dummy_art(lv_obj_t * parent, const cellphone_photo_asset_t * asset);
+ static lv_color_t photo_color(uint32_t idx);
+ static uint32_t photo_asset_index(const cellphone_photo_asset_t * asset);
+@@ -108,7 +123,24 @@ static lv_obj_t * s_viewer_counter_label;
+ static lv_obj_t * s_viewer_images[PHOTO_COUNT];
+ static lv_timer_t * s_viewer_load_timer;
+ static bool s_fullscreen;
+-static bool s_viewer_highres_ready;
++
++/* decode-to-RAM ring: slot = photo_index % RAM_SLOTS */
++#define RAM_SLOTS 3
++/* Quiet window after the last scroll/animation before a (blocking) decode may
++ * start, so the just-settled frame is rendered first. */
++#define DECODE_QUIET_MS 90
++static uint8_t * s_ram_buf[RAM_SLOTS];
++static lv_image_dsc_t s_ram_dsc[RAM_SLOTS];
++static int32_t s_ram_holds[RAM_SLOTS];
++static const void * s_bound[PHOTO_COUNT];
++static bool s_ram_ok;
++static uint32_t s_last_activity;
++static bool s_refr_done;       /* set by LV_EVENT_REFR_READY: a full refresh+flush happened */
++static bool s_refr_cb_added;
++
++/* Persistent thumbnail cache (decoded once, reused by grid + viewer placeholders). */
++static uint8_t * s_thumb_buf[PHOTO_COUNT];
++static lv_image_dsc_t s_thumb_dsc[PHOTO_COUNT];
+ 
+ /**********************
+  *   GLOBAL FUNCTIONS
+@@ -166,11 +198,12 @@ lv_obj_t * cellphone_photo_create(lv_obj_t * parent)
+         lv_obj_set_grid_cell(thumb,
+                              LV_GRID_ALIGN_STRETCH, col, 1,
+                              LV_GRID_ALIGN_STRETCH, row, 1);
+-        create_photo_card(thumb, &s_photo_assets[i], s_photo_assets[i].thumb_path,
++        create_photo_card(thumb, &s_photo_assets[i], photo_thumb_src(i),
+                           true, true, THUMB_RADIUS, THUMB_LABEL_H,
+                           thumb_click_cb, (void *)(uintptr_t)i);
+     }
+ 
++    photo_mem_report("grid-enter");
+     return parent;
+ }
+ 
+@@ -237,7 +270,13 @@ const char * cellphone_photo_source_name(void)
+ static void thumb_click_cb(lv_event_t * e)
+ {
+     s_selected_photo_idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
++    /* Skip the slide-in animation when entering the viewer. On this CPU the
++     * animated two-screen redraw costs ~1.4s and blocks the already RAM-cached
++     * thumbnail from appearing. Swap instantly; the back/pop animation stays. */
++    bool prev = cellphone_screen_transitions_enabled();
++    cellphone_screen_set_transitions_enabled(false);
+     cellphone_screen_push(photo_viewer_create);
++    cellphone_screen_set_transitions_enabled(prev);
+ }
+ 
+ static lv_obj_t * photo_viewer_create(lv_obj_t * parent)
+@@ -246,9 +285,16 @@ static lv_obj_t * photo_viewer_create(lv_obj_t * parent)
+ 
+     viewer_cancel_load_timer();
+     s_fullscreen = false;
+-    s_viewer_highres_ready = false;
+-    s_synced_photo_idx = PHOTO_IDX_NONE;
+     s_viewer_root = parent;
++    photo_ram_alloc();
++    lv_memzero(s_bound, sizeof(s_bound));
++    s_last_activity = lv_tick_get();
++    s_refr_done = false;       /* force a thumb render before the first decode */
++    if(!s_refr_cb_added) {
++        lv_display_add_event_cb(lv_display_get_default(), viewer_refr_ready_cb,
++                                LV_EVENT_REFR_READY, NULL);
++        s_refr_cb_added = true;
++    }
+ 
+     lv_obj_set_size(parent, CELLPHONE_CONTENT_W, CELLPHONE_CONTENT_H);
+     cellphone_obj_paint_fill(parent, lv_color_black());
+@@ -303,16 +349,19 @@ static lv_obj_t * photo_viewer_create(lv_obj_t * parent)
+         /* Radius 0 on fullscreen tiles: a non-zero radius with clip_corner
+          * makes lv_refr allocate two ARGB8888 corner-mask layers per draw
+          * (~width * radius * 4 * 2 bytes), a ~19 KiB transient at 240x10. */
+-        uint32_t delta = i > s_selected_photo_idx ? i - s_selected_photo_idx : s_selected_photo_idx - i;
+-        const char * initial_path = (delta <= 1) ? s_photo_assets[i].thumb_path : NULL;
+-        s_viewer_images[i] = create_photo_card(tile, &s_photo_assets[i], initial_path,
++        /* No thumb placeholder in the viewer: tiles start empty and get the
++         * decoded full-res image once it is ready. */
++        s_viewer_images[i] = create_photo_card(tile, &s_photo_assets[i], NULL,
+                                                true, false, 0, 0,
+                                                viewer_tap_cb, parent);
++        s_bound[i] = NULL;
+     }
+ 
+     lv_obj_add_event_cb(tv, viewer_tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+-    viewer_sync_loaded_images();
+-    viewer_schedule_loaded_image_sync();
++    lv_obj_add_event_cb(tv, viewer_scroll_cb, LV_EVENT_SCROLL, NULL);
++    viewer_bind_tiles();
++    viewer_ensure_decode_timer();
++    photo_mem_report("viewer-enter");
+     lv_tileview_set_tile_by_index(tv, s_selected_photo_idx, 0, LV_ANIM_OFF);
+ 
+     lv_obj_add_event_cb(parent, viewer_delete_cb, LV_EVENT_DELETE, NULL);
+@@ -339,9 +388,10 @@ static void viewer_delete_cb(lv_event_t * e)
+     s_viewer_counter = NULL;
+     s_viewer_counter_label = NULL;
+     viewer_cancel_load_timer();
+-    s_viewer_highres_ready = false;
+-    s_synced_photo_idx = PHOTO_IDX_NONE;
++    photo_ram_free();
+     lv_memzero(s_viewer_images, sizeof(s_viewer_images));
++    lv_memzero(s_bound, sizeof(s_bound));
++    photo_mem_report("viewer-exit");
+ }
+ 
+ /* Toggle fullscreen by sliding the viewer chrome off-screen and back. */
+@@ -388,7 +438,8 @@ static void viewer_tile_changed_cb(lv_event_t * e)
+     if(new_idx == s_selected_photo_idx) return;
+ 
+     s_selected_photo_idx = new_idx;
+-    viewer_enter_deferred_mode();
++    viewer_bind_tiles();
++    viewer_ensure_decode_timer();
+     update_counter_label(s_selected_photo_idx);
+     viewer_set_active_title(s_selected_photo_idx);
+ }
+@@ -405,19 +456,10 @@ static void viewer_visibility_cb(lv_event_t * e)
+         return;
+     }
+     if(code == (lv_event_code_t)cellphone_screen_event_shown()) {
+-        if(!s_viewer_highres_ready) viewer_schedule_loaded_image_sync();
++        viewer_ensure_decode_timer();
+     }
+ }
+ 
+-static void viewer_load_timer_cb(lv_timer_t * timer)
+-{
+-    LV_UNUSED(timer);
+-    s_viewer_load_timer = NULL;
+-    s_viewer_highres_ready = true;
+-    s_synced_photo_idx = PHOTO_IDX_NONE;
+-    viewer_sync_loaded_images();
+-}
+-
+ static void viewer_cancel_load_timer(void)
+ {
+     if(s_viewer_load_timer) {
+@@ -426,69 +468,228 @@ static void viewer_cancel_load_timer(void)
+     }
+ }
+ 
+-static void viewer_enter_deferred_mode(void)
++/* Allocate the 3 RGB565 ring buffers once per viewer open. On failure
++ * s_ram_ok stays false and the viewer falls back to streaming from file. */
++static void photo_ram_alloc(void)
++{
++    s_ram_ok = false;
++    if(!cellphone_photo_uses_real_jpeg()) return;
++
++    const uint32_t w = CELLPHONE_CONTENT_W;
++    const uint32_t h = CELLPHONE_CONTENT_H;
++    const uint32_t stride = w * 2;            /* RGB565 */
++    const uint32_t sz = stride * h;
++
++    for(int k = 0; k < RAM_SLOTS; k++) {
++        s_ram_buf[k] = lv_malloc(sz);
++        s_ram_holds[k] = -1;
++        if(s_ram_buf[k] == NULL) {            /* out of memory: roll back, use file fallback */
++            for(int j = 0; j < k; j++) { lv_free(s_ram_buf[j]); s_ram_buf[j] = NULL; }
++            return;
++        }
++        lv_memzero(&s_ram_dsc[k], sizeof(lv_image_dsc_t));
++        s_ram_dsc[k].header.magic  = LV_IMAGE_HEADER_MAGIC;
++        s_ram_dsc[k].header.cf     = LV_COLOR_FORMAT_RGB565;
++        s_ram_dsc[k].header.w      = w;
++        s_ram_dsc[k].header.h      = h;
++        s_ram_dsc[k].header.stride = stride;
++        s_ram_dsc[k].data          = s_ram_buf[k];
++        s_ram_dsc[k].data_size     = sz;
++    }
++    s_ram_ok = true;
++}
++
++static void photo_ram_free(void)
+ {
+-    /* After the initial defer window has elapsed, a swipe must NOT drop
+-     * the visible tile from view_path back to thumb_path -- that thumb
+-     * pop is the visual regression we promised to avoid. Only the first
+-     * open (highres_ready==false) needs the timer-deferred load. */
+-    if(s_viewer_highres_ready) {
+-        s_synced_photo_idx = PHOTO_IDX_NONE;
+-        viewer_sync_loaded_images();
++    for(int k = 0; k < RAM_SLOTS; k++) {
++        if(s_ram_buf[k]) {
++            lv_image_cache_drop(&s_ram_dsc[k]);
++            lv_free(s_ram_buf[k]);
++            s_ram_buf[k] = NULL;
++        }
++        s_ram_holds[k] = -1;
++    }
++    s_ram_ok = false;
++}
++
++/* Decode a JPEG file once into an RGB565 buffer via an off-screen canvas. */
++static bool photo_decode_file_to_buf(const char * path, uint8_t * buf, uint32_t w, uint32_t h)
++{
++    lv_obj_t * canvas = lv_canvas_create(lv_screen_active());
++    if(canvas == NULL) return false;
++    lv_obj_add_flag(canvas, LV_OBJ_FLAG_HIDDEN);
++    lv_canvas_set_buffer(canvas, buf, (int32_t)w, (int32_t)h, LV_COLOR_FORMAT_RGB565);
++
++    lv_layer_t layer;
++    lv_canvas_init_layer(canvas, &layer);
++    lv_draw_image_dsc_t d;
++    lv_draw_image_dsc_init(&d);
++    d.src = path;
++    lv_area_t a = { 0, 0, (int32_t)w - 1, (int32_t)h - 1 };
++    lv_draw_image(&layer, &d, &a);
++    lv_canvas_finish_layer(canvas, &layer);   /* synchronous: buf now holds decoded RGB565 */
++
++    lv_obj_delete(canvas);
++    return true;
++}
++
++/* Decode one photo into its ring slot, once. */
++static void photo_decode_to_slot(uint32_t idx, int slot)
++{
++    if(!photo_decode_file_to_buf(s_photo_assets[idx].view_path, s_ram_buf[slot],
++                                 CELLPHONE_CONTENT_W, CELLPHONE_CONTENT_H)) {
+         return;
+     }
+-    viewer_cancel_load_timer();
+-    s_synced_photo_idx = PHOTO_IDX_NONE;
+-    viewer_sync_loaded_images();
+-    viewer_schedule_loaded_image_sync();
++    s_ram_holds[slot] = (int32_t)idx;
++    lv_image_cache_drop(&s_ram_dsc[slot]);    /* slot reused in place: drop stale cached decode */
+ }
+ 
+-static void viewer_sync_loaded_images(void)
++/* Return a RAM-cached thumbnail image source (decoded once on first use), or the
++ * file path if the cache can't be populated. Lets the grid prime the cache so the
++ * viewer can show thumbnails instantly without per-frame re-decoding. */
++static const void * photo_thumb_src(uint32_t i)
++{
++    if(i >= PHOTO_COUNT) return NULL;
++    const char * path = s_photo_assets[i].thumb_path;
++    if(!cellphone_photo_real_jpeg_supported()) return (const void *)path;
++    if(s_thumb_buf[i] != NULL) return (const void *)&s_thumb_dsc[i];
++
++    lv_image_header_t hdr;
++    if(lv_image_decoder_get_info(path, &hdr) != LV_RESULT_OK) return (const void *)path;
++
++    uint32_t w = hdr.w, h = hdr.h;
++    uint32_t stride = w * 2;
++    uint32_t sz = stride * h;
++    uint8_t * b = lv_malloc(sz);
++    if(b == NULL) return (const void *)path;
++    if(!photo_decode_file_to_buf(path, b, w, h)) { lv_free(b); return (const void *)path; }
++
++    lv_memzero(&s_thumb_dsc[i], sizeof(lv_image_dsc_t));
++    s_thumb_dsc[i].header.magic  = LV_IMAGE_HEADER_MAGIC;
++    s_thumb_dsc[i].header.cf     = LV_COLOR_FORMAT_RGB565;
++    s_thumb_dsc[i].header.w      = w;
++    s_thumb_dsc[i].header.h      = h;
++    s_thumb_dsc[i].header.stride = stride;
++    s_thumb_dsc[i].data          = b;
++    s_thumb_dsc[i].data_size     = sz;
++    s_thumb_buf[i] = b;
++    return (const void *)&s_thumb_dsc[i];
++}
++
++#if LV_DEBUG
++static void photo_mem_report(const char * tag)
++{
++    lv_mem_monitor_t m;
++    lv_mem_monitor(&m);
++    printf("[LVMEM %-14s] used=%u/%u KB (%u%%) free=%u KB biggest_free=%u KB max_used=%u KB frag=%u%%\n",
++           tag,
++           (unsigned)((m.total_size - m.free_size) >> 10), (unsigned)(m.total_size >> 10),
++           (unsigned)m.used_pct, (unsigned)(m.free_size >> 10),
++           (unsigned)(m.free_biggest_size >> 10), (unsigned)(m.max_used >> 10),
++           (unsigned)m.frag_pct);
++    fflush(stdout);
++}
++#endif
++
++/* Point each tile at decoded RAM (if resident), a thumb (placeholder), or NULL
++ * (outside the +-1 window). All candidates are stable pointers, so s_bound[]
++ * pointer-identity is enough to skip redundant re-binds. */
++static void viewer_bind_tiles(void)
+ {
+     if(!cellphone_photo_uses_real_jpeg()) return;
+-    if(s_selected_photo_idx == s_synced_photo_idx) return;
+ 
+-    uint32_t i;
+-    for(i = 0; i < PHOTO_COUNT; i++) {
++    for(uint32_t i = 0; i < PHOTO_COUNT; i++) {
+         if(s_viewer_images[i] == NULL) continue;
+ 
+         uint32_t delta = i > s_selected_photo_idx ? i - s_selected_photo_idx : s_selected_photo_idx - i;
+-        const char * want;
+-        if(s_viewer_highres_ready) want = (delta <= 1) ? s_photo_assets[i].view_path : NULL;
+-        else want = (delta <= 1) ? s_photo_assets[i].thumb_path : NULL;
+-        /* lv_image_set_src strdups file paths, so pointer-equality against
+-         * lv_image_get_src never matches; compare by content instead. */
+-        const char * cur = (const char *)lv_image_get_src(s_viewer_images[i]);
+-        if(want == cur) continue;
+-        if(want && cur && lv_strcmp(cur, want) == 0) continue;
++        const void * want;
++        if(delta > 1) {
++            want = NULL;
++        }
++        else if(s_ram_ok) {
++            int slot = (int)(i % RAM_SLOTS);
++            want = (s_ram_holds[slot] == (int32_t)i)
++                   ? (const void *)&s_ram_dsc[slot]   /* decoded view, in RAM */
++                   : NULL;                            /* empty until the view is decoded */
++        }
++        else {
++            want = (const void *)s_photo_assets[i].view_path;     /* fallback: stream from file */
++        }
++
++        if(s_bound[i] == want) continue;
++        s_bound[i] = want;
+         lv_image_set_src(s_viewer_images[i], want);
+     }
+-
+-    s_synced_photo_idx = s_selected_photo_idx;
+ }
+ 
+-static void viewer_schedule_loaded_image_sync(void)
++/* Decode the first not-yet-resident window photo, prioritising the visible one,
++ * then the next, then the previous. One decode per call so the loop can breathe. */
++static bool viewer_decode_one_pending(void)
+ {
+-    if(!cellphone_photo_uses_real_jpeg()) return;
+-    if(s_viewer_highres_ready) return;
+-    if(s_viewer_load_timer) return;
+-    if(!cellphone_screen_transitions_enabled()) {
+-        s_viewer_highres_ready = true;
+-        s_synced_photo_idx = PHOTO_IDX_NONE;
+-        viewer_sync_loaded_images();
+-        return;
++    if(!s_ram_ok) return false;
++
++    uint32_t order[3];
++    int n = 0;
++    order[n++] = s_selected_photo_idx;
++    if(s_selected_photo_idx + 1 < PHOTO_COUNT) order[n++] = s_selected_photo_idx + 1;
++    if(s_selected_photo_idx >= 1)              order[n++] = s_selected_photo_idx - 1;
++
++    for(int k = 0; k < n; k++) {
++        int slot = (int)(order[k] % RAM_SLOTS);
++        if(s_ram_holds[slot] != (int32_t)order[k]) {
++            photo_decode_to_slot(order[k], slot);
++            return true;
++        }
+     }
++    return false;
++}
+ 
+-    s_viewer_load_timer = lv_timer_create(viewer_load_timer_cb,
+-                                          CELLPHONE_MOTION_STANDARD.enter_ms + 20, NULL);
+-    if(s_viewer_load_timer) {
+-        lv_timer_set_repeat_count(s_viewer_load_timer, 1);
++static void viewer_scroll_cb(lv_event_t * e)
++{
++    LV_UNUSED(e);
++    s_last_activity = lv_tick_get();           /* park decoding while the view is moving */
++}
++
++static void viewer_refr_ready_cb(lv_event_t * e)
++{
++    LV_UNUSED(e);
++    s_refr_done = true;
++}
++
++static void viewer_decode_timer_cb(lv_timer_t * timer)
++{
++    lv_timer_set_period(timer, 16);
++
++    /* Decode only when the screen is idle: a ~1.1s decode must not pre-empt an
++     * unfinished transition. Wait until no animation runs (screen-push / chrome)
++     * and the swipe has settled long enough for that frame to render. */
++    if(lv_anim_count_running() > 0) {
++        s_last_activity = lv_tick_get();
+         return;
+     }
++    if(lv_tick_elaps(s_last_activity) < DECODE_QUIET_MS) return;
++
++    /* Require a full refresh+flush since the last bind, so the just-bound thumb
++     * (or previous high-res) is actually on screen before this blocking decode
++     * runs -- otherwise the thumb render and the decode collapse into one frozen
++     * frame and the thumb is never seen. */
++    if(!s_refr_done) return;
++    s_refr_done = false;
++
++    bool did = viewer_decode_one_pending();
++    viewer_bind_tiles();                       /* reveal whatever just became resident */
++    if(did) photo_mem_report("after-decode");
++    if(!did) {                                 /* whole window resident: stop pumping */
++        lv_timer_delete(timer);
++        s_viewer_load_timer = NULL;
++    }
++}
+ 
+-    s_viewer_highres_ready = true;
+-    s_synced_photo_idx = PHOTO_IDX_NONE;
+-    viewer_sync_loaded_images();
++static void viewer_ensure_decode_timer(void)
++{
++    if(!s_ram_ok) return;
++    if(s_viewer_load_timer) return;
++    s_viewer_load_timer = lv_timer_create(viewer_decode_timer_cb, 16, NULL);
+ }
+ 
+ static void viewer_set_active_title(uint32_t photo_idx)
+@@ -523,7 +724,7 @@ static void init_photo_surface(lv_obj_t * obj, bool clickable,
+ }
+ 
+ static lv_obj_t * create_photo_card(lv_obj_t * parent, const cellphone_photo_asset_t * asset,
+-                                    const char * image_path, bool clickable, bool show_caption,
++                                    const void * image_path, bool clickable, bool show_caption,
+                                     lv_coord_t radius, lv_coord_t label_h,
+                                     lv_event_cb_t click_cb, void * user_data)
+ {
+@@ -534,7 +735,10 @@ static lv_obj_t * create_photo_card(lv_obj_t * parent, const cellphone_photo_ass
+         img = lv_image_create(parent);
+         if(img == NULL) return NULL;
+         lv_obj_set_size(img, LV_PCT(100), LV_PCT(100));
+-        lv_image_set_inner_align(img, LV_IMAGE_ALIGN_COVER);
++        /* CENTER (not COVER): high-res views are already content-sized so they
++         * fill 1:1, and the small thumb placeholder shows centered without an
++         * expensive software upscale (~800ms for 74x74 -> fullscreen on this CPU). */
++        lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CENTER);
+         if(image_path != NULL) lv_image_set_src(img, image_path);
+ 
+         if(show_caption) {
+diff --git a/src/draw/lv_draw_image.c b/src/draw/lv_draw_image.c
+index dc2155869..f0a637614 100644
+--- a/src/draw/lv_draw_image.c
++++ b/src/draw/lv_draw_image.c
+@@ -13,6 +13,18 @@
+ #include "lv_draw_private.h"
+ #include "../core/lv_obj_private.h"
+ 
++#if LV_DEBUG
++#include <time.h>
++uint64_t g_io_us, g_io_bytes, g_decode_us, g_blit_us, g_flush_us, g_mcu_cnt, g_img_cnt;
++uint64_t g_idct_us, g_yuv_us;   /* sub-parts of decode */
++uint64_t perf_now_us(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
++}
++#endif
++
+ /*********************
+  *      DEFINES
+  *********************/
+@@ -350,9 +362,19 @@ static void img_decode_and_draw(lv_draw_task_t * t, const lv_draw_image_dsc_t *
+     sup.palette = decoder_dsc->palette;
+     sup.palette_size = decoder_dsc->palette_size;
+ 
++#if LV_DEBUG
++    g_img_cnt++;
++#endif
++
+     /*The whole image is available, just draw it*/
+     if(decoder_dsc->decoded && (relative_decoded_area == NULL || relative_decoded_area->x1 == LV_COORD_MIN)) {
++#if LV_DEBUG
++        uint64_t _t = perf_now_us();
++#endif
+         draw_core_cb(t, draw_dsc, decoder_dsc, &sup, img_area, clipped_img_area);
++#if LV_DEBUG
++        g_blit_us += perf_now_us() - _t;
++#endif
+     }
+     /*Draw in smaller pieces*/
+     else {
+@@ -375,8 +397,14 @@ static void img_decode_and_draw(lv_draw_task_t * t, const lv_draw_image_dsc_t *
+                 /*Limit draw area to the current decoded area and draw the image*/
+                 lv_area_t clipped_img_area_sub;
+                 if(lv_area_intersect(&clipped_img_area_sub, clipped_img_area, &absolute_decoded_area)) {
++#if LV_DEBUG
++                    uint64_t _t = perf_now_us();
++#endif
+                     draw_core_cb(t, draw_dsc, decoder_dsc, &sup,
+                                  &absolute_decoded_area, &clipped_img_area_sub);
++#if LV_DEBUG
++                    g_blit_us += perf_now_us() - _t;
++#endif
+                 }
+             }
+         }
+diff --git a/src/drivers/display/drm/lv_linux_drm.c b/src/drivers/display/drm/lv_linux_drm.c
+index 0714cc3df..7440843a9 100644
+--- a/src/drivers/display/drm/lv_linux_drm.c
++++ b/src/drivers/display/drm/lv_linux_drm.c
+@@ -112,6 +112,9 @@ static int drm_setup_buffers(drm_dev_t * drm_dev);
+ static int drm_dmabuf_set_plane(drm_dev_t * drm_dev, drm_buffer_t * buf);
+ static void drm_flush_wait(lv_display_t * drm_dev);
+ static void drm_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map);
++#if LV_DEBUG
++static void drm_flush_timed(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map);
++#endif
+ static void drm_dmabuf_set_active_buf(lv_event_t * event);
+ static void drm_del_event_cb(lv_event_t * event);
+ 
+@@ -149,7 +152,11 @@ lv_display_t * lv_linux_drm_create(void)
+     }
+     lv_display_set_driver_data(disp, drm_dev);
+     lv_display_set_flush_wait_cb(disp, drm_flush_wait);
++#if LV_DEBUG
++    lv_display_set_flush_cb(disp, drm_flush_timed);
++#else
+     lv_display_set_flush_cb(disp, drm_flush);
++#endif
+     lv_display_add_event_cb(disp, drm_del_event_cb, LV_EVENT_DELETE, NULL);
+ 
+     return disp;
+@@ -1061,6 +1068,17 @@ static void drm_flush_wait(lv_display_t * disp)
+     }
+ }
+ 
++#if LV_DEBUG
++static void drm_flush_timed(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
++{
++    extern uint64_t g_flush_us;
++    extern uint64_t perf_now_us(void);
++    uint64_t _t = perf_now_us();
++    drm_flush(disp, area, px_map);
++    g_flush_us += perf_now_us() - _t;
++}
++#endif
++
+ static void drm_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
+ {
+     if(!lv_display_flush_is_last(disp)) return;
+diff --git a/src/drivers/display/fb/lv_linux_fbdev.c b/src/drivers/display/fb/lv_linux_fbdev.c
+index c7e0ad195..07ab5cb85 100644
+--- a/src/drivers/display/fb/lv_linux_fbdev.c
++++ b/src/drivers/display/fb/lv_linux_fbdev.c
+@@ -79,6 +79,9 @@ typedef struct {
+ 
+ static void del_event_cb(lv_event_t * e);
+ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
++#if LV_DEBUG
++static void flush_cb_timed(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
++#endif
+ static uint32_t tick_get_cb(void);
+ 
+ /**********************
+@@ -116,7 +119,11 @@ lv_display_t * lv_linux_fbdev_create(void)
+     }
+     dsc->fbfd = -1;
+     lv_display_set_driver_data(disp, dsc);
++#if LV_DEBUG
++    lv_display_set_flush_cb(disp, flush_cb_timed);
++#else
+     lv_display_set_flush_cb(disp, flush_cb);
++#endif
+     lv_display_add_event_cb(disp, del_event_cb, LV_EVENT_DELETE, NULL);
+ 
+     return disp;
+@@ -305,6 +312,17 @@ static void del_event_cb(lv_event_t * e)
+     lv_display_set_driver_data(disp, NULL);
+ }
+ 
++#if LV_DEBUG
++static void flush_cb_timed(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
++{
++    extern uint64_t g_flush_us;
++    extern uint64_t perf_now_us(void);
++    uint64_t _t = perf_now_us();
++    flush_cb(disp, area, color_p);
++    g_flush_us += perf_now_us() - _t;
++}
++#endif
++
+ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
+ {
+     lv_linux_fb_t * dsc = lv_display_get_driver_data(disp);
+diff --git a/src/libs/tjpgd/lv_tjpgd.c b/src/libs/tjpgd/lv_tjpgd.c
+index f8ec29b59..099579e92 100644
+--- a/src/libs/tjpgd/lv_tjpgd.c
++++ b/src/libs/tjpgd/lv_tjpgd.c
+@@ -22,7 +22,7 @@
+ 
+ #define DECODER_NAME    "TJPGD"
+ 
+-#define TJPGD_WORKBUFF_SIZE 4096 /* Recommended by TJpgDec. */
++#define TJPGD_WORKBUFF_SIZE 16384 /* JD_FASTDECODE==2 needs ~6KB extra for the Huffman LUTs */
+ 
+ /**********************
+  *      TYPEDEFS
+@@ -100,7 +100,7 @@ static lv_result_t decoder_info(lv_image_decoder_t * decoder, lv_image_decoder_d
+             header->cf = LV_COLOR_FORMAT_RAW;
+             header->w = img_dsc->header.w;
+             header->h = img_dsc->header.h;
+-            header->stride = img_dsc->header.w * 3;
++            header->stride = img_dsc->header.w << 1;
+             return LV_RESULT_OK;
+ #else
+             LV_LOG_WARN("LV_USE_FS_MEMFS needs to enabled to decode from data");
+@@ -112,18 +112,22 @@ static lv_result_t decoder_info(lv_image_decoder_t * decoder, lv_image_decoder_d
+         const char * fn = src;
+         const char * ext = lv_fs_get_ext(fn);
+         if((lv_strcmp(ext, "jpg") == 0) || (lv_strcmp(ext, "jpeg") == 0)) {
+-            uint8_t workb[TJPGD_WORKBUFF_SIZE];
++            uint8_t * workb = lv_malloc(TJPGD_WORKBUFF_SIZE);   /* heap, not stack: pool is now 16KB */
+             JDEC jd;
+-            JRESULT rc = jd_prepare(&jd, input_func, workb, TJPGD_WORKBUFF_SIZE, &dsc->file);
++            JRESULT rc;
++            if(workb == NULL) return LV_RESULT_INVALID;
++            rc = jd_prepare(&jd, input_func, workb, TJPGD_WORKBUFF_SIZE, &dsc->file);
+             if(rc) {
+                 LV_LOG_WARN("jd_prepare error: %d", rc);
++                lv_free(workb);
+                 return LV_RESULT_INVALID;
+             }
+             header->cf = LV_COLOR_FORMAT_RAW;
+             header->w = jd.width;
+             header->h = jd.height;
+-            header->stride = jd.width * 3;
++            header->stride = jd.width << 1;
+ 
++            lv_free(workb);
+             return LV_RESULT_OK;
+         }
+     }
+@@ -135,15 +139,33 @@ static size_t input_func(JDEC * jd, uint8_t * buff, size_t ndata)
+     lv_fs_file_t * f = jd->device;
+     if(!f) return 0;
+ 
++#if LV_DEBUG
++    extern uint64_t g_io_us, g_io_bytes;
++    extern uint64_t perf_now_us(void);
++#endif
++
+     if(buff) {
+         uint32_t rn = 0;
++#if LV_DEBUG
++        uint64_t _t = perf_now_us();
++#endif
+         lv_fs_read(f, buff, (uint32_t)ndata, &rn);
++#if LV_DEBUG
++        g_io_us += perf_now_us() - _t;
++        g_io_bytes += rn;
++#endif
+         return rn;
+     }
+     else {
+         uint32_t pos;
++#if LV_DEBUG
++        uint64_t _t = perf_now_us();
++#endif
+         lv_fs_tell(f, &pos);
+         lv_fs_seek(f, (uint32_t)(ndata + pos),  LV_FS_SEEK_SET);
++#if LV_DEBUG
++        g_io_us += perf_now_us() - _t;
++#endif
+         return ndata;
+     }
+     return 0;
+@@ -202,10 +224,10 @@ static lv_result_t decoder_open(lv_image_decoder_t * decoder, lv_image_decoder_d
+     }
+ 
+     dsc->user_data = session;
+-    dsc->header.cf = LV_COLOR_FORMAT_RGB888;
++    dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+     dsc->header.w = session->jd.width;
+     dsc->header.h = session->jd.height;
+-    dsc->header.stride = session->jd.width * 3;
++    dsc->header.stride = session->jd.width << 1;
+ 
+     return LV_RESULT_OK;
+ 
+@@ -270,7 +292,7 @@ static lv_result_t decoder_get_area(lv_image_decoder_t * decoder, lv_image_decod
+ 
+     decoded->header.w = lv_area_get_width(decoded_area);
+     decoded->header.h = lv_area_get_height(decoded_area);
+-    decoded->header.stride = decoded->header.w * 3;
++    decoded->header.stride = decoded->header.w << 1;
+     decoded->data_size = decoded->header.stride * decoded->header.h;
+ 
+     /* Process restart interval if enabled */
+@@ -284,6 +306,12 @@ static lv_result_t decoder_get_area(lv_image_decoder_t * decoder, lv_image_decod
+         jd->rst = 1;
+     }
+ 
++#if LV_DEBUG
++    extern uint64_t g_decode_us, g_io_us, g_yuv_us, g_mcu_cnt;
++    extern uint64_t perf_now_us(void);
++    uint64_t _io0 = g_io_us, _t = perf_now_us();
++#endif
++
+     /* Load an MCU (decompress huffman coded stream, dequantize and apply IDCT) */
+     rc = jd_mcu_load(jd);
+     if(rc != JDR_OK) {
+@@ -291,6 +319,10 @@ static lv_result_t decoder_get_area(lv_image_decoder_t * decoder, lv_image_decod
+         return LV_RESULT_INVALID;
+     }
+ 
++#if LV_DEBUG
++    uint64_t _tload_end = perf_now_us();
++#endif
++
+     /* Output the MCU (YCbCr to RGB, scaling and output) */
+     rc = jd_mcu_output(jd, NULL, decoded_area->x1, decoded_area->y1);
+     if(rc != JDR_OK) {
+@@ -298,6 +330,13 @@ static lv_result_t decoder_get_area(lv_image_decoder_t * decoder, lv_image_decod
+         return LV_RESULT_INVALID;
+     }
+ 
++#if LV_DEBUG
++    uint64_t _now = perf_now_us();
++    g_yuv_us    += _now - _tload_end;                       /* YCbCr->RGB output */
++    g_decode_us += (_now - _t) - (g_io_us - _io0);          /* total decode, io removed */
++    g_mcu_cnt++;
++#endif
++
+     return LV_RESULT_OK;
+ }
+ 
+diff --git a/src/libs/tjpgd/tjpgd.c b/src/libs/tjpgd/tjpgd.c
+index 7152adf17..0f886aecd 100644
+--- a/src/libs/tjpgd/tjpgd.c
++++ b/src/libs/tjpgd/tjpgd.c
+@@ -34,6 +34,15 @@
+     #define HUFF_MASK   (HUFF_LEN - 1)
+ #endif
+ 
++/* Output bytes per pixel, resolved at compile time from JD_FORMAT */
++#if JD_FORMAT == 0
++    #define JD_BPP 3    /* RGB888 */
++#elif JD_FORMAT == 1
++    #define JD_BPP 2    /* RGB565 */
++#else
++    #define JD_BPP 1    /* Grayscale */
++#endif
++
+ 
+ /*-----------------------------------------------*/
+ /* Zigzag-order to raster-order conversion table */
+@@ -806,7 +815,15 @@ JRESULT jd_mcu_load(
+                     }
+                 }
+                 else {
++#if LV_DEBUG
++                    extern uint64_t g_idct_us;
++                    extern uint64_t perf_now_us(void);
++                    uint64_t _ti = perf_now_us();
++#endif
+                     block_idct(tmp, bp);    /* Apply IDCT and store the block to the MCU buffer */
++#if LV_DEBUG
++                    g_idct_us += perf_now_us() - _ti;
++#endif
+                 }
+             }
+         }
+@@ -860,34 +877,49 @@ JRESULT jd_mcu_output(
+     if(!JD_USE_SCALE || jd->scale != 3) {   /* Not for 1/8 scaling */
+         pix = (uint8_t *)jd->workbuf;
+ 
+-        if(JD_FORMAT != 2) {    /* RGB output (build an RGB MCU from Y/C component) */
+-            for(iy = 0; iy < my; iy++) {
+-                pc = py = jd->mcubuf;
+-                if(my == 16) {      /* Double block height? */
+-                    pc += 64 * 4 + (iy >> 1) * 8;
+-                    if(iy >= 8) py += 64;
++#if JD_FORMAT != 2    /* RGB output (build an RGB MCU from Y/C component) */
++        for(iy = 0; iy < my; iy++) {
++            pc = py = jd->mcubuf;
++            if(my == 16) {      /* Double block height? */
++                pc += 64 * 4 + (iy >> 1) * 8;
++                if(iy >= 8) py += 64;
++            }
++            else {              /* Single block height */
++                pc += mx * 8 + iy * 8;
++            }
++            py += iy * 8;
++            for(ix = 0; ix < mx; ix++) {
++                cb = pc[0] - 128;   /* Get Cb/Cr component and remove offset */
++                cr = pc[64] - 128;
++                if(mx == 16) {                  /* Double block width? */
++                    if(ix == 8) py += 64 - 8;   /* Jump to next block if double block height */
++                    pc += ix & 1;               /* Step forward chroma pointer every two pixels */
+                 }
+-                else {              /* Single block height */
+-                    pc += mx * 8 + iy * 8;
++                else {                          /* Single block width */
++                    pc++;                       /* Step forward chroma pointer every pixel */
+                 }
+-                py += iy * 8;
+-                for(ix = 0; ix < mx; ix++) {
+-                    cb = pc[0] - 128;   /* Get Cb/Cr component and remove offset */
+-                    cr = pc[64] - 128;
+-                    if(mx == 16) {                  /* Double block width? */
+-                        if(ix == 8) py += 64 - 8;   /* Jump to next block if double block height */
+-                        pc += ix & 1;               /* Step forward chroma pointer every two pixels */
+-                    }
+-                    else {                          /* Single block width */
+-                        pc++;                       /* Step forward chroma pointer every pixel */
+-                    }
+-                    yy = *py++;         /* Get Y component */
+-                    *pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
+-                    *pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
+-                    *pix++ = /*R*/ BYTECLIP(yy + ((int)(1.402 * CVACC) * cr) / CVACC);
++                yy = *py++;         /* Get Y component */
++                {
++                    int b = BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
++                    int g = BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
++                    int r = BYTECLIP(yy + ((int)(1.402 * CVACC) * cr) / CVACC);
++#if JD_FORMAT == 1
++                    /* Pack straight to LVGL RGB565 (R high, B low), little-endian 2 bytes/pixel.
++                     * Avoids a second RGB888->RGB565 pass over the buffer (saves memory traffic). */
++                    unsigned int p = (((unsigned)r & 0xF8) << 8)
++                                     | (((unsigned)g & 0xFC) << 3)
++                                     | ((unsigned)b >> 3);
++                    *pix++ = (uint8_t)p;
++                    *pix++ = (uint8_t)(p >> 8);
++#else
++                    *pix++ = (uint8_t)b;   /* B */
++                    *pix++ = (uint8_t)g;   /* G */
++                    *pix++ = (uint8_t)r;   /* R */
++#endif
+                 }
+             }
+         }
++#endif
+     }
+ 
+     /* Squeeze up pixel table if a part of MCU is to be truncated */
+@@ -898,30 +930,20 @@ JRESULT jd_mcu_output(
+ 
+         s = d = (uint8_t *)jd->workbuf;
+         for(yi = 0; yi < ry; yi++) {
+-            for(xi = 0; xi < rx; xi++) {   /* Copy effective pixels */
++            for(xi = 0; xi < rx; xi++) {   /* Copy effective pixels (JD_BPP bytes each) */
+                 *d++ = *s++;
+-                if(JD_FORMAT != 2) {
+-                    *d++ = *s++;
+-                    *d++ = *s++;
+-                }
++#if JD_BPP >= 2
++                *d++ = *s++;
++#endif
++#if JD_BPP >= 3
++                *d++ = *s++;
++#endif
+             }
+-            s += (mx - rx) * (JD_FORMAT != 2 ? 3 : 1);  /* Skip truncated pixels */
++            s += (mx - rx) * JD_BPP;  /* Skip truncated pixels */
+         }
+     }
+ 
+-    /* Convert RGB888 to RGB565 if needed */
+-    if(JD_FORMAT == 1) {
+-        uint8_t * s = (uint8_t *)jd->workbuf;
+-        uint16_t w, * d = (uint16_t *)s;
+-        unsigned int n = rx * ry;
+-
+-        do {
+-            w = (*s++ & 0xF8) << 8;     /* RRRRR----------- */
+-            w |= (*s++ & 0xFC) << 3;    /* -----GGGGGG----- */
+-            w |= *s++ >> 3;             /* -----------BBBBB */
+-            *d++ = w;
+-        } while(--n);
+-    }
++    /* RGB565 is produced directly in the loop above -- no separate conversion pass. */
+ 
+     /* Output the rectangular */
+     if(outfunc) return  outfunc(jd, jd->workbuf, &rect) ? JDR_OK : JDR_INTR;
+diff --git a/src/libs/tjpgd/tjpgdcnf.h b/src/libs/tjpgd/tjpgdcnf.h
+index dc27d6a95..fbf191540 100644
+--- a/src/libs/tjpgd/tjpgdcnf.h
++++ b/src/libs/tjpgd/tjpgdcnf.h
+@@ -5,7 +5,7 @@
+ #define JD_SZBUF        512
+ /* Specifies size of stream input buffer */
+ 
+-#define JD_FORMAT       0
++#define JD_FORMAT       1
+ /* Specifies output pixel format.
+ /  0: RGB888 (24-bit/pix)
+ /  1: RGB565 (16-bit/pix)
+@@ -24,7 +24,7 @@
+ /  1: Enable
+ */
+ 
+-#define JD_FASTDECODE   1
++#define JD_FASTDECODE   2
+ /* Optimization level
+ /  0: Basic optimization. Suitable for 8/16-bit MCUs.
+ /  1: + 32-bit barrel shifter. Suitable for 32-bit MCUs.

@@ -5,7 +5,7 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 
-set(EXTRA_CFLAGS "-O2 -mcpu=cortex-m4 -mthumb -mfdpic --sysroot=${CMAKE_CURRENT_LIST_DIR}/../buildroot-2026.02/output/host/arm-buildroot-uclinuxfdpiceabi/sysroot")
+set(EXTRA_CFLAGS "-O2 -DLV_DEBUG=0 -mcpu=cortex-m4 -mthumb -mfdpic --sysroot=${CMAKE_CURRENT_LIST_DIR}/../buildroot-2026.02/output/host/arm-buildroot-uclinuxfdpiceabi/sysroot")
 set(CMAKE_C_FLAGS_INIT "${EXTRA_CFLAGS}")
 
 set(tools ${CMAKE_CURRENT_LIST_DIR}/../buildroot-2026.02/output/host)
