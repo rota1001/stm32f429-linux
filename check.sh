@@ -9,6 +9,11 @@ rootfs/usr/lib/libts.so.0
 rootfs/usr/lib/libevdev.so
 rootfs/usr/lib/libdrm.so.2
 cellphone/build/bin/lvglsim
+rootfs-ext2/etc/ts.conf
+rootfs-ext2/etc/pointercal
+rootfs-ext2/lvglsim
+rootfs-ext2/bin/busybox
+rootfs-ext2.img
 "
 
 for FILE in $FILES; do

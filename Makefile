@@ -3,7 +3,7 @@ ROOT_DIR := $(CURDIR)
 BUILDROOT_DIR := $(ROOT_DIR)/buildroot-$(BUILDROOT_VERSION)
 BUILDROOT_TAR := buildroot-$(BUILDROOT_VERSION).tar.xz
 
-all: fetch defconfig build
+all: fetch defconfig build rootfs-ext2
 
 fetch:
 	chmod +x fetch.sh
@@ -35,6 +35,19 @@ initromfs: cellphone
 	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs/usr/lib/lib*
 	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs/lib/*
 	$(BUILDROOT_DIR)/output/host/bin/genromfs -d rootfs -f $(BUILDROOT_DIR)/output/images/rootfs.romfs
+
+rootfs-ext2: cellphone
+	rm -rf rootfs-ext2
+	mkdir rootfs-ext2
+	mkdir -p rootfs-ext2/etc
+	mkdir -p rootfs-ext2/bin
+	cp cellphone/build/bin/lvglsim rootfs-ext2
+	cp $(BUILDROOT_DIR)/output/build/busybox-1.37.0/busybox rootfs-ext2/bin
+	$(BUILDROOT_DIR)/output/host/bin/arm-linux-strip rootfs-ext2/bin/busybox
+	ln -s busybox rootfs-ext2/bin/sh
+	cp cellphone/ts.conf rootfs-ext2/etc
+	cp cellphone/pointercal rootfs-ext2/etc
+	mke2fs -t ext2 -d rootfs-ext2/ rootfs-ext2.img 32M -F
 
 build:
 	make -C $(BUILDROOT_DIR) -j`nproc`
