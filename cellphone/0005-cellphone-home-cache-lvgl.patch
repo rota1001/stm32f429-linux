@@ -1,0 +1,631 @@
+diff --git a/demos/cellphone/lv_demo_cellphone.c b/demos/cellphone/lv_demo_cellphone.c
+index 98b17d365..c62295894 100644
+--- a/demos/cellphone/lv_demo_cellphone.c
++++ b/demos/cellphone/lv_demo_cellphone.c
+@@ -708,7 +708,12 @@ void cellphone_screen_push(cellphone_screen_create_fn fn)
+     /* Subtle vertical gradient so the LCD area reads as a glossy panel, not a
+      * flat block of color. Both stops come from the active theme; for themes
+      * where a flat look is desired, set bg_grad equal to bg. */
++#if CELLPHONE_FLAT_BG
++    /* Flat solid wallpaper -> DMA2D register-to-memory fill (no SW gradient). */
++    cellphone_obj_paint_fill(scr, CELLPHONE_COLOR_BG);
++#else
+     cellphone_obj_paint_grad(scr, CELLPHONE_COLOR_BG, CELLPHONE_COLOR_BG_GRAD);
++#endif
+ 
+     /*
+      * Content area: sits between status bar and nav bar.
+diff --git a/demos/cellphone/lv_demo_cellphone_common.h b/demos/cellphone/lv_demo_cellphone_common.h
+index 26091486f..081681d50 100644
+--- a/demos/cellphone/lv_demo_cellphone_common.h
++++ b/demos/cellphone/lv_demo_cellphone_common.h
+@@ -135,6 +135,14 @@ void cellphone_theme_set(uint32_t idx);
+ #define CELLPHONE_COLOR_NAVBAR_GRAD    (cellphone_theme_active()->navbar_grad)
+ #define CELLPHONE_COLOR_BG             (cellphone_theme_active()->bg)
+ #define CELLPHONE_COLOR_BG_GRAD        (cellphone_theme_active()->bg_grad)
++
++/* Wallpaper fill mode. 0 = subtle vertical gradient (SW fill every frame);
++ * 1 = flat solid color so the screen/tile background becomes a DMA2D
++ * register-to-memory fill (grad.dir == NONE). Shared by the screen wallpaper
++ * and the home page tiles. Build lvglsim with 0 and lvglsim2 with 1. */
++#ifndef CELLPHONE_FLAT_BG
++#define CELLPHONE_FLAT_BG 1
++#endif
+ #define CELLPHONE_COLOR_CARD         (cellphone_theme_active()->card)
+ #define CELLPHONE_COLOR_TEXT         (cellphone_theme_active()->text)
+ #define CELLPHONE_COLOR_TEXT_SEC     (cellphone_theme_active()->text_sec)
+diff --git a/demos/cellphone/lv_demo_cellphone_home.c b/demos/cellphone/lv_demo_cellphone_home.c
+index 4c4bb645e..9ed22dc1c 100644
+--- a/demos/cellphone/lv_demo_cellphone_home.c
++++ b/demos/cellphone/lv_demo_cellphone_home.c
+@@ -7,6 +7,20 @@
+ 
+ #include "lv_demo_cellphone_home.h"
+ #include "lv_demo_cellphone_anim.h"
++#include "../../src/core/lv_obj_draw_private.h"  /* lv_obj_get_ext_draw_size */
++
++/* Set to 1 to print how long each app icon takes to draw (per icon, per frame). */
++#define DEBUG_APP 1
++#if DEBUG_APP
++#include <stdio.h>
++#include <time.h>
++static inline uint64_t app_now_us(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
++}
++#endif
+ 
+ #if LV_USE_DEMO_CELLPHONE
+ 
+@@ -35,6 +49,13 @@ static void icon_event_cb(lv_event_t * e);
+ static void page_changed_cb(lv_event_t * e);
+ static lv_obj_t * create_icon(lv_obj_t * parent, const cellphone_app_entry_t * app);
+ static void icon_plate_draw_cb(lv_event_t * e);
++static void home_cache_free(void);
++static void home_cache_build(void);
++static void home_page_show_cache(uint32_t page, bool show_cache);
++static int32_t home_active_page(void);
++static void home_reveal_timer_cb(lv_timer_t * t);
++static void home_scroll_cb(lv_event_t * e);
++static void home_visibility_cb(lv_event_t * e);
+ static void indicator_set_active(uint32_t active_idx, bool animated);
+ static void glyph_draw_block(lv_layer_t * layer, lv_draw_rect_dsc_t * dsc,
+                              int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+@@ -43,14 +64,37 @@ static void glyph_draw_block(lv_layer_t * layer, lv_draw_rect_dsc_t * dsc,
+ /**********************
+  *  STATIC VARIABLES
+  **********************/
++#define HOME_MAX_PAGES 4
++
+ static lv_obj_t * s_dots[4];  /* max 4 pages */
+ static uint32_t   s_page_count;
+-static bool       s_edit_mode;
+-static bool       s_ignore_release_click;
+-static lv_obj_t * s_picked_icon;
++static bool       s_edit_mode;   /* reserved: suppresses the scroll->cache swap */
+ static lv_obj_t * s_tileview;
+ static uint32_t   s_restore_page;
+ 
++/* Per-page icon cache. Each page's icon grid is procedurally drawn (gradient
++ * plate + glyph + label per icon, ~160 ms for a full page), so re-rasterizing
++ * it on every scroll frame is what made paging lag. Instead each page is
++ * snapshotted once to an opaque RGB565 bitmap (the wallpaper is baked into the
++ * tile background) and shown ONLY while a swipe is in flight; the gesture then
++ * just DMA2D-copies the bitmaps (memory-to-memory + PFC, no blend). When the
++ * page is stable the live icons are shown so taps launch apps and show their
++ * native pressed background. To keep the settle cheap, only the *active* page
++ * is ever swapped between live icons and its bitmap; off-screen pages stay on
++ * their bitmap. The cache lives only while home is visible (built on "shown",
++ * freed on "hidden") so it never competes with the photo decode buffers. */
++static lv_obj_t *     s_tiles[HOME_MAX_PAGES];
++static lv_obj_t *     s_cache_img[HOME_MAX_PAGES];
++static lv_draw_buf_t * s_cache_buf[HOME_MAX_PAGES];
++static lv_timer_t *   s_cache_build_timer;
++static int32_t        s_live_page;   /* page currently showing live icons; -1 = all cached */
++
++/* LV_EVENT_SCROLL fires on every motion frame (drag + post-release snap), so we
++ * keep the page on its bitmap while any scroll activity is seen and reveal the
++ * live icons only after motion has been quiet for the debounce window. This is
++ * robust against slow drags / fling tails that could otherwise look "settled". */
++static lv_timer_t *   s_reveal_timer;
++
+ /**********************
+  *   GLOBAL FUNCTIONS
+  **********************/
+@@ -58,10 +102,15 @@ static uint32_t   s_restore_page;
+ lv_obj_t * cellphone_home_create(lv_obj_t * parent)
+ {
+     s_edit_mode = false;
+-    s_ignore_release_click = false;
+-    s_picked_icon = NULL;
+     s_tileview = NULL;
+ 
++    /* Drop any cache from a previous home instance (theme refresh / rebuild
++     * deletes and recreates the whole tree). This destroys the old draw
++     * buffers so they don't leak; the image/tile objects are already gone. */
++    s_live_page = -1;
++    home_cache_free();
++    for(uint32_t i = 0; i < HOME_MAX_PAGES; i++) s_tiles[i] = NULL;
++
+     uint32_t app_count;
+     const cellphone_app_entry_t * apps = cellphone_app_registry(&app_count);
+ 
+@@ -108,7 +157,15 @@ lv_obj_t * cellphone_home_create(lv_obj_t * parent)
+ 
+     for(uint32_t p = 0; p < s_page_count; p++) {
+         lv_obj_t * tile = lv_tileview_add_tile(tv, p, 0, LV_DIR_HOR);
+-        lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
++        if(p < HOME_MAX_PAGES) s_tiles[p] = tile;
++        /* Opaque wallpaper background baked into each tile so the per-page
++         * snapshot can be an opaque RGB565 bitmap (DMA2D copy, not blend).
++         * Matches the screen wallpaper, so icon gaps look identical. */
++#if CELLPHONE_FLAT_BG
++        cellphone_obj_paint_fill(tile, CELLPHONE_COLOR_BG);
++#else
++        cellphone_obj_paint_grad(tile, CELLPHONE_COLOR_BG, CELLPHONE_COLOR_BG_GRAD);
++#endif
+         lv_obj_set_style_pad_all(tile, 0, 0);
+         lv_obj_set_style_border_width(tile, 0, 0);
+ 
+@@ -152,6 +209,21 @@ lv_obj_t * cellphone_home_create(lv_obj_t * parent)
+     /* Listen for page changes */
+     lv_obj_add_event_cb(tv, page_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+ 
++    /* Any scroll motion swaps the active page to its cached bitmap; the live
++     * icons return only after motion stops (see home_scroll_cb). */
++    lv_obj_add_event_cb(tv, home_scroll_cb, LV_EVENT_SCROLL, NULL);
++
++    /* Build the page cache when home becomes visible, free it when an app is
++     * opened on top. The screen is the tileview's grandparent (parent is the
++     * content container created by the screen stack). */
++    lv_obj_t * screen = lv_obj_get_parent(parent);
++    if(screen) {
++        lv_obj_add_event_cb(screen, home_visibility_cb,
++                            (lv_event_code_t)cellphone_screen_event_shown(), NULL);
++        lv_obj_add_event_cb(screen, home_visibility_cb,
++                            (lv_event_code_t)cellphone_screen_event_hidden(), NULL);
++    }
++
+     if(s_restore_page < s_page_count) {
+         lv_tileview_set_tile_by_index(tv, s_restore_page, 0, LV_ANIM_OFF);
+         indicator_set_active(s_restore_page, false);
+@@ -224,6 +296,10 @@ static void icon_plate_draw_cb(lv_event_t * e)
+ 
+     if(app == NULL) return;
+ 
++#if DEBUG_APP
++    uint64_t _app_t0 = app_now_us();
++#endif
++
+     accent = lv_color_hex(app->icon_color_hex);
+     lv_obj_get_coords(obj, &coords);
+ 
+@@ -232,10 +308,8 @@ static void icon_plate_draw_cb(lv_event_t * e)
+     plate.x2 = plate.x1 + ICON_PLATE_SIZE - 1;
+     plate.y2 = plate.y1 + ICON_PLATE_SIZE - 1;
+ 
+-    /* Modern squircle plate: solid accent at the top transitioning to a
+-     * slightly darkened accent at the bottom, no gloss strip. The
+-     * gradient is a single 2-stop linear so it composes with the MCU
+-     * profile's reduced gradient-stop budget. */
++    /* Modern squircle plate: solid accent at top -> slightly darkened accent
++     * at the bottom (2-stop vertical gradient). */
+     lv_draw_rect_dsc_init(&rect_dsc);
+     rect_dsc.bg_color = accent;
+     rect_dsc.bg_grad.dir = LV_GRAD_DIR_VER;
+@@ -249,6 +323,10 @@ static void icon_plate_draw_cb(lv_event_t * e)
+     rect_dsc.bg_grad.stops[1].frac = 255;
+     rect_dsc.bg_opa = LV_OPA_COVER;
+     rect_dsc.radius = ICON_PLATE_RADIUS;
++
++    /* One SW gradient rounded rect. The whole grid is cached to a per-page
++     * bitmap (see home_cache_*) so this only runs when the page is idle, not
++     * on every scroll frame -- the banded DMA2D variant was a net loss. */
+     lv_draw_rect(layer, &rect_dsc, &plate);
+ 
+     /* Glyph: either a bundled FA5 symbol drawn as text, or a custom
+@@ -276,6 +354,12 @@ static void icon_plate_draw_cb(lv_event_t * e)
+     else if(app->glyph_draw) {
+         app->glyph_draw(layer, &plate, accent);
+     }
++
++#if DEBUG_APP
++    printf("[APP] %-12s draw=%lu us\n", app->name,
++           (unsigned long)(app_now_us() - _app_t0));
++    fflush(stdout);
++#endif
+ }
+ 
+ /* Stamp a small color block inside the plate. The plate-glyph drawers
+@@ -457,50 +541,23 @@ void cellphone_glyph_tetris(lv_layer_t * layer, const lv_area_t * plate, lv_colo
+     }
+ }
+ 
++/* Per-icon handler on the live icons. The active page shows live icons whenever
++ * it is stable, so a tap launches the app and the icon paints its own
++ * LV_STATE_PRESSED background; the cache bitmap only replaces them during a
++ * swipe.
++ *
++ * Long-press "edit mode" is intentionally disabled. It never actually reordered
++ * icons (only a grow/drop animation), but it set s_edit_mode, which suppresses
++ * the scroll->cache swap -- so swiping with an icon "picked up" rendered the
++ * whole grid live every frame (very laggy) and the icon's scale transform
++ * tripped lv_obj_transform_point_array warnings during scroll. */
+ static void icon_event_cb(lv_event_t * e)
+ {
+-    lv_event_code_t code = lv_event_get_code(e);
+-
+-    if(code == LV_EVENT_CLICKED) {
+-        if(s_ignore_release_click) {
+-            s_ignore_release_click = false;
+-            return;
+-        }
+-
+-        /* If in edit mode, tapping an icon exits edit mode instead of launching */
+-        if(s_edit_mode) {
+-            if(s_picked_icon) {
+-                cellphone_anim_drop(s_picked_icon);
+-                s_picked_icon = NULL;
+-            }
+-            s_edit_mode = false;
+-            return;
+-        }
+-
+-        cellphone_screen_create_fn fn =
+-            (cellphone_screen_create_fn)lv_event_get_user_data(e);
+-        if(fn) cellphone_screen_push(fn);
+-        return;
+-    }
+-
+-    if(code != LV_EVENT_LONG_PRESSED) return;
+-
+-    if(s_ignore_release_click) {
+-        s_ignore_release_click = false;
+-        return;
+-    }
+-
+-    if(s_edit_mode) {
+-        s_ignore_release_click = true;
+-        return;
+-    }
++    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+ 
+-    s_edit_mode = true;
+-    s_ignore_release_click = true;
+-
+-    lv_obj_t * pressed = lv_event_get_target(e);
+-    s_picked_icon = pressed;
+-    cellphone_anim_pickup(pressed);
++    cellphone_screen_create_fn fn =
++        (cellphone_screen_create_fn)lv_event_get_user_data(e);
++    if(fn) cellphone_screen_push(fn);
+ }
+ 
+ static void indicator_set_active(uint32_t active_idx, bool animated)
+@@ -541,4 +598,192 @@ static void page_changed_cb(lv_event_t * e)
+     indicator_set_active((uint32_t)col, true);
+ }
+ 
++/*--------------------------------------------------------------------------
++ * Per-page icon cache
++ *------------------------------------------------------------------------*/
++
++/* One page: show_cache=true puts the bitmap up and hides the live icons (used
++ * while scrolling and for off-screen pages); false shows the live icons and
++ * hides the bitmap (the stable, interactive page). No-op (icons stay live) if
++ * the page has no cached bitmap (OOM / not built yet). */
++static void home_page_show_cache(uint32_t page, bool show_cache)
++{
++    if(page >= s_page_count || page >= HOME_MAX_PAGES) return;
++    lv_obj_t * tile = s_tiles[page];
++    lv_obj_t * img = s_cache_img[page];
++    if(!tile || !lv_obj_is_valid(tile)) return;
++    if(show_cache && (!img || !lv_obj_is_valid(img))) return;
++
++    uint32_t n = lv_obj_get_child_count(tile);
++    for(uint32_t i = 0; i < n; i++) {
++        lv_obj_t * child = lv_obj_get_child(tile, i);
++        bool is_cache = (child == img);
++        /* cache image visible while cached; icons are the opposite. */
++        if(is_cache ? show_cache : !show_cache) lv_obj_clear_flag(child, LV_OBJ_FLAG_HIDDEN);
++        else lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
++    }
++}
++
++/* Index of the page currently snapped into the viewport. */
++static int32_t home_active_page(void)
++{
++    if(!s_tileview) return 0;
++    lv_obj_t * tile = lv_tileview_get_tile_active(s_tileview);
++    if(!tile) return 0;
++    int32_t tv_w = lv_obj_get_width(s_tileview);
++    if(tv_w <= 0) return 0;
++    return lv_obj_get_x(tile) / tv_w;
++}
++
++/* Snapshot every page's icon grid into an opaque RGB565 bitmap and park an
++ * (initially hidden, non-clickable) image over each tile. The wallpaper is
++ * baked into the tile background, so the snapshot is fully opaque: during a
++ * swipe DMA2D copies it (memory-to-memory + PFC) instead of blending ARGB8888,
++ * which halves SDRAM traffic, skips the background cache-clean, and halves the
++ * cache memory. On OOM a page is skipped and falls back to live rendering. */
++static void home_cache_build(void)
++{
++    for(uint32_t p = 0; p < s_page_count && p < HOME_MAX_PAGES; p++) {
++        if(s_cache_buf[p]) continue;                 /* already cached */
++        lv_obj_t * tile = s_tiles[p];
++        if(!tile || !lv_obj_is_valid(tile)) continue;
++
++        lv_draw_buf_t * buf = lv_snapshot_take(tile, LV_COLOR_FORMAT_RGB565);
++        if(!buf) continue;
++        s_cache_buf[p] = buf;
++
++        lv_obj_t * img = lv_image_create(tile);
++        lv_obj_add_flag(img, LV_OBJ_FLAG_IGNORE_LAYOUT);
++        lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
++        /* The snapshot covers the tile plus its ext-draw margin; align the
++         * image so pixel (0,0) of the bitmap lands on the tile's top-left. */
++        int32_t ext = lv_obj_get_ext_draw_size(tile);
++        lv_obj_set_pos(img, -ext, -ext);
++        lv_image_set_src(img, buf);
++        lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
++        s_cache_img[p] = img;
++    }
++}
++
++static void home_cache_build_timer_cb(lv_timer_t * t)
++{
++    s_cache_build_timer = NULL;
++    home_cache_build();
++    /* Put every off-screen page on its bitmap so a swipe never has to render
++     * them live; keep the active page live so it stays tappable with its native
++     * pressed background. (Skip while editing -- icons must stay live then.) */
++    if(!s_edit_mode) {
++        int32_t active = home_active_page();
++        for(uint32_t p = 0; p < s_page_count && p < HOME_MAX_PAGES; p++) {
++            home_page_show_cache(p, (int32_t)p != active);
++        }
++        s_live_page = active;
++    }
++    lv_timer_delete(t);
++}
++
++/* Tear the cache down completely: restore the live icons, delete the cache
++ * images and free their draw buffers. Safe to call when the objects have
++ * already been deleted (rebuild path) -- everything is guarded. */
++static void home_cache_free(void)
++{
++    if(s_cache_build_timer) {
++        lv_timer_delete(s_cache_build_timer);
++        s_cache_build_timer = NULL;
++    }
++    if(s_reveal_timer) {
++        lv_timer_delete(s_reveal_timer);
++        s_reveal_timer = NULL;
++    }
++
++    for(uint32_t p = 0; p < HOME_MAX_PAGES; p++) {
++        home_page_show_cache(p, false);   /* bring icons back before deleting */
++        if(s_cache_img[p] && lv_obj_is_valid(s_cache_img[p])) {
++            lv_obj_delete(s_cache_img[p]);
++        }
++        s_cache_img[p] = NULL;
++        if(s_cache_buf[p]) {
++            lv_draw_buf_destroy(s_cache_buf[p]);
++            s_cache_buf[p] = NULL;
++        }
++    }
++    s_live_page = -1;
++}
++
++/* True while any pointer device is pressed (finger still on screen). */
++static bool home_pointer_pressed(void)
++{
++    lv_indev_t * id = lv_indev_get_next(NULL);
++    while(id) {
++        if(lv_indev_get_type(id) == LV_INDEV_TYPE_POINTER &&
++           lv_indev_get_state(id) == LV_INDEV_STATE_PRESSED) {
++            return true;
++        }
++        id = lv_indev_get_next(id);
++    }
++    return false;
++}
++
++/* Fires once the scroll has been quiet for the debounce window. If the finger
++ * is still down (a mid-drag pause) we wait longer; otherwise reveal the settled
++ * page's live icons (a single redraw, while the screen is already stationary). */
++static void home_reveal_timer_cb(lv_timer_t * t)
++{
++    if(s_edit_mode) {
++        lv_timer_delete(t);
++        s_reveal_timer = NULL;
++        return;
++    }
++    if(home_pointer_pressed()) {   /* still touching -> not settled yet */
++        lv_timer_reset(t);
++        return;
++    }
++    int32_t pg = home_active_page();
++    home_page_show_cache((uint32_t)pg, false);
++    s_live_page = pg;
++    lv_timer_delete(t);
++    s_reveal_timer = NULL;
++}
++
++/* Driven by LV_EVENT_SCROLL, which fires on every motion frame of both the drag
++ * and the post-release snap animation. Any motion -> make sure no page shows
++ * live icons (the whole gesture stays on DMA2D-copied bitmaps), and (re)arm the
++ * debounce timer. The timer only fires ~80 ms after motion fully stops, so the
++ * live-icon reveal can never happen mid-scroll. Edit mode keeps icons live. */
++static void home_scroll_cb(lv_event_t * e)
++{
++    LV_UNUSED(e);
++    if(s_edit_mode) return;
++
++    if(s_live_page >= 0) {
++        home_page_show_cache((uint32_t)s_live_page, true);
++        s_live_page = -1;
++    }
++
++    if(s_reveal_timer) {
++        lv_timer_reset(s_reveal_timer);
++    }
++    else {
++        s_reveal_timer = lv_timer_create(home_reveal_timer_cb, 80, NULL);
++    }
++}
++
++static void home_visibility_cb(lv_event_t * e)
++{
++    lv_event_code_t code = lv_event_get_code(e);
++
++    if(code == (lv_event_code_t)cellphone_screen_event_hidden()) {
++        home_cache_free();
++        return;
++    }
++    if(code == (lv_event_code_t)cellphone_screen_event_shown()) {
++        /* Defer the (heavy) snapshot a couple of frames so it lands while the
++         * screen is idle rather than blocking the return-to-home transition. */
++        if(!s_cache_build_timer && !s_cache_buf[0]) {
++            s_cache_build_timer = lv_timer_create(home_cache_build_timer_cb, 60, NULL);
++            lv_timer_set_repeat_count(s_cache_build_timer, 1);
++        }
++    }
++}
++
+ #endif /* LV_USE_DEMO_CELLPHONE */
+diff --git a/src/core/lv_obj_pos.c b/src/core/lv_obj_pos.c
+index 4dfbb3124..eaa23d20c 100644
+--- a/src/core/lv_obj_pos.c
++++ b/src/core/lv_obj_pos.c
+@@ -404,6 +404,11 @@ void lv_obj_update_layout(const lv_obj_t * obj)
+     }
+     LV_PROFILER_LAYOUT_BEGIN;
+     update_layout_mutex = true;
++#if LV_DEBUG
++    extern uint64_t g_layout_us;
++    extern uint64_t perf_now_us(void);
++    uint64_t _lay_t = perf_now_us();
++#endif
+ 
+     lv_obj_t * scr = lv_obj_get_screen(obj);
+     /*Repeat until there are no more layout invalidations*/
+@@ -413,6 +418,9 @@ void lv_obj_update_layout(const lv_obj_t * obj)
+         layout_update_core(scr);
+         LV_LOG_TRACE("Layout update end");
+     }
++#if LV_DEBUG
++    g_layout_us += perf_now_us() - _lay_t;
++#endif
+ 
+     lv_display_t * disp = lv_obj_get_display(scr);
+     lv_display_send_event(disp, LV_EVENT_UPDATE_LAYOUT_COMPLETED, NULL);
+diff --git a/src/draw/dma2d/lv_draw_dma2d.c b/src/draw/dma2d/lv_draw_dma2d.c
+index 9666eb8d9..1b7deabdb 100644
+--- a/src/draw/dma2d/lv_draw_dma2d.c
++++ b/src/draw/dma2d/lv_draw_dma2d.c
+@@ -280,6 +280,10 @@ static int32_t evaluate_cb(lv_draw_unit_t * draw_unit, lv_draw_task_t * task)
+     return 0;
+ }
+ 
++#if LV_DEBUG
++uint64_t _dma2d_op_start;  /* timestamp when the in-flight DMA2D task was launched */
++#endif
++
+ static int32_t dispatch_cb(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
+ {
+     lv_draw_dma2d_unit_t * draw_dma2d_unit = (lv_draw_dma2d_unit_t *) draw_unit;
+@@ -293,6 +297,13 @@ static int32_t dispatch_cb(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
+             return LV_DRAW_UNIT_IDLE;
+         }
+         post_transfer_tasks(draw_dma2d_unit);
++#if LV_DEBUG
++        {
++            extern uint64_t g_dma2d_us;
++            extern uint64_t perf_now_us(void);
++            g_dma2d_us += perf_now_us() - _dma2d_op_start;
++        }
++#endif
+ #endif
+     }
+ 
+@@ -310,6 +321,15 @@ static int32_t dispatch_cb(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
+     t->draw_unit = draw_unit;
+     draw_dma2d_unit->task_act = t;
+ 
++#if LV_DEBUG
++    {
++        extern uint64_t g_dma2d_tasks;
++        extern uint64_t perf_now_us(void);
++        g_dma2d_tasks++;
++        _dma2d_op_start = perf_now_us();
++    }
++#endif
++
+     if(t->type == LV_DRAW_TASK_TYPE_FILL) {
+         lv_draw_fill_dsc_t * dsc = t->draw_dsc;
+         const lv_area_t * coords = &t->area;
+diff --git a/src/draw/lv_draw_image.c b/src/draw/lv_draw_image.c
+index f0a637614..82ecd9cf7 100644
+--- a/src/draw/lv_draw_image.c
++++ b/src/draw/lv_draw_image.c
+@@ -17,6 +17,11 @@
+ #include <time.h>
+ uint64_t g_io_us, g_io_bytes, g_decode_us, g_blit_us, g_flush_us, g_mcu_cnt, g_img_cnt;
+ uint64_t g_idct_us, g_yuv_us;   /* sub-parts of decode */
++uint64_t g_dma2d_tasks;         /* count of tasks actually taken by the DMA2D unit */
++uint64_t g_fill_us, g_letter_us;/* SW fill (incl. gradient wallpaper) / SW glyph time */
++uint64_t g_dma2d_us;            /* DMA2D task wall-time: start -> completion (incl. cache maint.) */
++uint64_t g_layout_us;           /* lv_obj_update_layout work (grid/flex relayout) */
++uint64_t g_vsync_us;            /* drm_flush_wait: blocking poll() for the page-flip/vsync */
+ uint64_t perf_now_us(void)
+ {
+     struct timespec ts;
+diff --git a/src/draw/sw/lv_draw_sw.c b/src/draw/sw/lv_draw_sw.c
+index 80dbc334e..454d29cab 100644
+--- a/src/draw/sw/lv_draw_sw.c
++++ b/src/draw/sw/lv_draw_sw.c
+@@ -382,10 +382,18 @@ static void render_thread_cb(void * ptr)
+ static void execute_drawing(lv_draw_task_t * t)
+ {
+     LV_PROFILER_DRAW_BEGIN;
++#if LV_DEBUG
++    extern uint64_t g_fill_us, g_letter_us;
++    extern uint64_t perf_now_us(void);
++    uint64_t _sw_t = perf_now_us();
++#endif
+     /*Render the draw task*/
+     switch(t->type) {
+         case LV_DRAW_TASK_TYPE_FILL:
+             lv_draw_sw_fill(t, t->draw_dsc, &t->area);
++#if LV_DEBUG
++            g_fill_us += perf_now_us() - _sw_t;
++#endif
+             break;
+         case LV_DRAW_TASK_TYPE_BORDER:
+             lv_draw_sw_border(t, t->draw_dsc, &t->area);
+@@ -395,9 +403,15 @@ static void execute_drawing(lv_draw_task_t * t)
+             break;
+         case LV_DRAW_TASK_TYPE_LETTER:
+             lv_draw_sw_letter(t, t->draw_dsc, &t->area);
++#if LV_DEBUG
++            g_letter_us += perf_now_us() - _sw_t;
++#endif
+             break;
+         case LV_DRAW_TASK_TYPE_LABEL:
+             lv_draw_sw_label(t, t->draw_dsc, &t->area);
++#if LV_DEBUG
++            g_letter_us += perf_now_us() - _sw_t;
++#endif
+             break;
+         case LV_DRAW_TASK_TYPE_IMAGE:
+             lv_draw_sw_image(t, t->draw_dsc, &t->area);
+diff --git a/src/drivers/display/drm/lv_linux_drm.c b/src/drivers/display/drm/lv_linux_drm.c
+index 7440843a9..3d9878205 100644
+--- a/src/drivers/display/drm/lv_linux_drm.c
++++ b/src/drivers/display/drm/lv_linux_drm.c
+@@ -1048,6 +1048,11 @@ static int drm_setup_buffers(drm_dev_t * drm_dev)
+ static void drm_flush_wait(lv_display_t * disp)
+ {
+     drm_dev_t * drm_dev = lv_display_get_driver_data(disp);
++#if LV_DEBUG
++    extern uint64_t g_vsync_us;
++    extern uint64_t perf_now_us(void);
++    uint64_t _vt = perf_now_us();
++#endif
+ 
+     struct pollfd pfd;
+     pfd.fd = drm_dev->fd;
+@@ -1066,6 +1071,9 @@ static void drm_flush_wait(lv_display_t * disp)
+             return;
+         }
+     }
++#if LV_DEBUG
++    g_vsync_us += perf_now_us() - _vt;
++#endif
+ }
+ 
+ #if LV_DEBUG

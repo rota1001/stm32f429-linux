@@ -1,0 +1,63 @@
+diff --git a/lv_conf.defaults b/lv_conf.defaults
+index 3b83624..65a2177 100644
+--- a/lv_conf.defaults
++++ b/lv_conf.defaults
+@@ -12,6 +12,8 @@ LV_DEMO_CELLPHONE_FONT_CACHE_NORMAL 1536
+ LV_DEMO_CELLPHONE_FONT_CACHE_LARGE 1024
+ LV_USE_FLEX 1
+ LV_USE_GRID 1
++# Home screen caches each icon page to a bitmap via lv_snapshot
++LV_USE_SNAPSHOT 1
+ LV_GRADIENT_MAX_STOPS 2
+ LV_CACHE_DEF_SIZE (192 * 1024)
+ 
+diff --git a/src/lib/display_backends/drm.c b/src/lib/display_backends/drm.c
+index 0673a1f..2de2078 100644
+--- a/src/lib/display_backends/drm.c
++++ b/src/lib/display_backends/drm.c
+@@ -111,7 +111,8 @@ static void run_loop_drm(void)
+ 
+ #if LV_DEBUG
+     extern uint64_t g_io_us, g_io_bytes, g_decode_us, g_blit_us, g_flush_us, g_mcu_cnt, g_img_cnt;
+-    extern uint64_t g_idct_us, g_yuv_us;
++    extern uint64_t g_idct_us, g_yuv_us, g_dma2d_tasks;
++    extern uint64_t g_fill_us, g_letter_us, g_dma2d_us, g_layout_us, g_vsync_us;
+     extern uint64_t perf_now_us(void);
+     {
+         lv_mem_monitor_t m;
+@@ -126,24 +127,29 @@ static void run_loop_drm(void)
+     while(true) {
+ #if LV_DEBUG
+         g_io_us = g_io_bytes = g_decode_us = g_blit_us = g_flush_us = g_mcu_cnt = g_img_cnt = 0;
+-        g_idct_us = g_yuv_us = 0;
++        g_idct_us = g_yuv_us = g_dma2d_tasks = 0;
++        g_fill_us = g_letter_us = g_dma2d_us = g_layout_us = g_vsync_us = 0;
+         uint64_t _t0 = perf_now_us();
+ #endif
+         /* Returns the time to the next timer execution */
+         idle_time = lv_timer_handler();
+ #if LV_DEBUG
+         uint64_t fr = perf_now_us() - _t0;
+-        if(g_decode_us + g_blit_us + g_flush_us > 1000) {  /* only frames that actually redrew */
++        if(g_decode_us + g_fill_us + g_blit_us + g_flush_us > 1000 || g_dma2d_tasks) {  /* frames that redrew */
+             /* decode breakdown: huff+dequant = decode - idct - yuv */
+             uint64_t huff = g_decode_us - g_idct_us - g_yuv_us;
+             printf("frame=%llu io=%llu(%lluB) decode=%llu[huff=%llu idct=%llu yuv=%llu] "
+-                   "blit=%llu flush=%llu other=%llu imgs=%llu mcus=%llu\n",
++                   "fill=%llu letter=%llu blit=%llu dma2dus=%llu layout=%llu vsync=%llu flush=%llu other=%llu imgs=%llu mcus=%llu dma2d=%llu\n",
+                    (unsigned long long)fr, (unsigned long long)g_io_us, (unsigned long long)g_io_bytes,
+                    (unsigned long long)g_decode_us, (unsigned long long)huff,
+                    (unsigned long long)g_idct_us, (unsigned long long)g_yuv_us,
+-                   (unsigned long long)g_blit_us, (unsigned long long)g_flush_us,
+-                   (unsigned long long)(fr - g_io_us - g_decode_us - g_blit_us - g_flush_us),
+-                   (unsigned long long)g_img_cnt, (unsigned long long)g_mcu_cnt);
++                   (unsigned long long)g_fill_us, (unsigned long long)g_letter_us,
++                   (unsigned long long)g_blit_us, (unsigned long long)g_dma2d_us, (unsigned long long)g_layout_us,
++                   (unsigned long long)g_vsync_us, (unsigned long long)g_flush_us,
++                   (unsigned long long)(fr - g_io_us - g_decode_us - g_fill_us - g_letter_us
++                                        - g_blit_us - g_dma2d_us - g_layout_us - g_vsync_us - g_flush_us),
++                   (unsigned long long)g_img_cnt, (unsigned long long)g_mcu_cnt,
++                   (unsigned long long)g_dma2d_tasks);
+             fflush(stdout);
+         }
+ #endif

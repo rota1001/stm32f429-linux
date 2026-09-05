@@ -1,1 +1,8 @@
 buildroot-2026.02/
+buildroot-2026.02.tar.xz
+*/build/*
+rootfs/*
+rootfs-ext2/*
+rootfs-ext2.img
+cellphone/pointercal
+datasheet/*
